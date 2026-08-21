@@ -1,0 +1,5 @@
+.deepseek_api_key
+__pycache__/
+*.pyc
+log/
+tmp/**
