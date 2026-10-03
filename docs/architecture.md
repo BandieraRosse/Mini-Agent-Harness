@@ -21,7 +21,7 @@ MiniAgent 的核心仍然是可读的小型同步循环：上下文 → 模型�
 | `miniagent/processes.py` | Shell 子进程、后台任务、超时与取消 |
 | `miniagent/security.py` | 已知密钥脱敏与流式分片处理 |
 
-工具定义与参数校验放在同一个模块，避免旧版 `tools.json` 与实现失配。`agent.py` 保留启动兼容。旧版根目录 `api.py/context.py/tools.py/INSTRUCTIONS.md` 已迁入包；旧 `log/` 不迁移、不覆盖，`log_reader.py` 同时可读旧日志与新会话。
+工具定义与参数校验放在同一个模块，避免旧版 `tools.json` 与实现失配。`agent.py` 保留启动兼容。旧版根目录 `api.py/context.py/tools.py/INSTRUCTIONS.md` 已迁入包；旧 `log/` 不迁移、不覆盖，当前仅保存 JSON 会话文件。
 
 增强终端在主线程接收按键，在单个工作线程执行原来的 Agent 循环。界面从共享记录渲染，Ctrl+T 只改变显示方式；审批通过 Event 等待选择。Ctrl+C 设置取消事件，停止网络读取/命令并等待工作线程结束后再接收下一条任务，避免并行修改。未增加执行中追加任务、多 Agent 或插件等功能。设计来源与边界见 [终端交互](terminal.md)。
 
@@ -60,7 +60,7 @@ MiniAgent 的核心仍然是可读的小型同步循环：上下文 → 模型�
 
 ```bash
 python -m unittest discover -s tests -v
-python -m compileall -q miniagent agent.py log_reader.py
+python -m compileall -q miniagent agent.py
 ```
 
 测试使用临时项目和本地 HTTP 服务，覆盖 SSE 断流与多工具分片、重试、密钥泄漏、编辑冲突、补丁、后台进程、超时、中断、会话恢复及压缩，不依赖真实 API。CI 在 Ubuntu/Windows、Python 3.10/3.13 上运行。

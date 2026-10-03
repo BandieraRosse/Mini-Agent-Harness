@@ -69,11 +69,9 @@ Ctrl+C 中断当前模型生成或命令执行，回到可继续输入的状态�
 miniagent -C /path/to/project --list-sessions
 miniagent -C /path/to/project --resume
 miniagent -C /path/to/project --resume SESSION_ID --no-save
-python log_reader.py /path/to/project/.miniagent/sessions/SESSION_ID.json
-python log_reader.py /path/to/project/.miniagent/sessions/SESSION_ID.json --verbose
 ```
 
-会话保存 assistant/tool 的完整对应关系。恢复后等待新指令；输入“检查当前状态后继续”即可。历史中的后台 job ID 不可在新进程使用，需要检查实际文件或重新运行必要的验证。强制关机后的未知结果不代表命令未执行。
+会话保存 assistant/tool 的完整对应关系，可直接查看 `.miniagent/sessions/SESSION_ID.json`。恢复后等待新指令；输入“检查当前状态后继续”即可。历史中的后台 job ID 不可在新进程使用，需要检查实际文件或重新运行必要的验证。强制关机后的未知结果不代表命令未执行。
 
 遇到连接/空闲读取超时可提高 `--timeout`（默认 120 秒）；尚未收到生成内容时，部分网络错误与 429/5xx 最多重试两次。收到内容后不自动重试，不执行不完整工具调用。达到 40 轮限制后可继续输入，或启动时设置 `--max-rounds`。很长的上下文可调整 `--context-chars`，最少 16,000。
 

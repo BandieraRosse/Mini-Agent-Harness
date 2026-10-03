@@ -66,10 +66,9 @@ miniagent -C /path/to/project
 - [架构](docs/architecture.md)：上下文、Agent 循环、检查点与权限边界。
 - [工具参考](docs/tools.md)：参数、分页、补丁及执行限制。
 - [验收记录](docs/validation.md)：自动测试与真实 API 验证。
-- [原始需求](plan.md)。
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-源码集中于 `miniagent/`；`agent.py` 保留兼容入口。新会话在目标项目的 `.miniagent/sessions/`，`log_reader.py` 可以读取新会话及旧版 `log/` 日志。
+源码集中于 `miniagent/`；`agent.py` 保留兼容入口。会话保存在目标项目的 `.miniagent/sessions/`，可直接查看其中的 JSON 文件。
