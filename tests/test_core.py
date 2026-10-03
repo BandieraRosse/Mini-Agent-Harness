@@ -9,11 +9,13 @@ from unittest.mock import Mock
 from miniagent.api import APIError
 from miniagent.core import Agent
 from miniagent.security import Redactor
-from miniagent.sessions import Session, validate_and_repair
+from miniagent.sessions import Session, read_checkpoint, validate_and_repair
+from miniagent.processes import ProcessManager
+from miniagent.tools import ToolRegistry
 
 
 def completion(content="done", calls=None):
-    message = {"role": "assistant", "content": content}
+    message = {"role": "assistant", "content": content, "phase": "commentary" if calls else "final_answer"}
     if calls:
         message["tool_calls"] = calls
     return {"choices": [{"message": message, "finish_reason": "tool_calls" if calls else "stop"}], "usage": {}}
@@ -57,7 +59,7 @@ class AgentTests(unittest.TestCase):
         ids_seen_on_disk = []
 
         def execute(name, arguments):
-            checkpoint = json.loads(self.session.path.read_text(encoding="utf-8"))
+            checkpoint = read_checkpoint(self.session.path)
             ids_seen_on_disk.append([item["id"] for item in checkpoint["messages"][1]["tool_calls"]])
             if len(ids_seen_on_disk) == 2:
                 self.assertEqual(checkpoint["messages"][-1]["tool_call_id"], "a")
@@ -107,6 +109,26 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(first_results), 2)
         self.assertTrue(all(result["ok"] is False for result in first_results))
         self.tools.execute.assert_called_once_with("example_tool", {"value": 3})
+
+    def test_real_tool_results_feed_next_request_and_persist_with_error_codes(self):
+        (self.workspace / "code.py").write_text("needle\n", encoding="utf-8")
+        manager = ProcessManager(self.workspace, lambda *args: True, lambda text: text)
+        self.addCleanup(manager.close)
+        self.tools = ToolRegistry(self.workspace, manager, lambda *args: False, lambda text: text)
+        agent = self.agent(completion(None, [
+            call("search", json.dumps({"query": "needle", "files_only": True}), "search_text"),
+            call("denied", json.dumps({"path": "new.py", "content": "new"}), "create_file"),
+            call("command", json.dumps({"command": "echo finished", "yield_time_ms": 5000, "max_output_bytes": 256}), "run_command"),
+        ]), completion("done"))
+        self.assertTrue(agent.run("inspect and verify"))
+        outputs = {m["tool_call_id"]: json.loads(m["content"]) for m in agent.client.requests[1]["messages"] if m["role"] == "tool"}
+        self.assertEqual(outputs["search"]["files"], ["code.py"])
+        self.assertEqual(outputs["denied"]["error_code"], "APPROVAL_DENIED")
+        self.assertTrue(outputs["command"]["complete"])
+        self.assertEqual(outputs["command"]["exit_code"], 0)
+        self.assertFalse((self.workspace / "new.py").exists())
+        restored = Session(self.workspace, "deepseek", "fake-model").load(self.session.data["id"])
+        self.assertEqual(restored.messages, self.session.messages)
 
     def test_partial_api_error_never_executes_tools_and_leaves_resumable_history(self):
         agent = self.agent(APIError("stream ended before DONE"))

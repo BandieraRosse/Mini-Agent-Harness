@@ -12,7 +12,7 @@ from miniagent.sessions import Session
 
 
 def completion(content="done", calls=None):
-    message = {"role": "assistant", "content": content}
+    message = {"role": "assistant", "content": content, "phase": "commentary" if calls else "final_answer"}
     if calls:
         message["tool_calls"] = calls
     return {"choices": [{"message": message, "finish_reason": "tool_calls" if calls else "stop"}], "usage": {}}

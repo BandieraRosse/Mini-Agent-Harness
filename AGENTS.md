@@ -1,8 +1,8 @@
 # Mini Agent Project Context
 
-This is a deliberately small Agent Harness for learning the relationship between context, model requests, tool calls, observations, and the next model request.
+MiniAgent is a lightweight terminal coding tool focused on reliable execution, efficient tool calls, and convenient daily use. Codex is a reference for core capabilities and interaction quality.
 
-这是仓库开发 Agent 的入口。保持核心循环小而可读，让上下文、模型请求、工具调用、观察结果和下一次请求之间的关系容易追踪。
+这是仓库开发 Agent 的入口。项目以轻量、专业、可靠和高效为目标，逐步向 Codex 的核心工具能力靠拢。保持实现易维护，按实际需要引入抽象和依赖；教学演示不再是设计目标。模型接入与工具执行保持边界，便于后续扩展 OpenAI API。
 
 ## 开始工作
 
@@ -14,7 +14,7 @@ This is a deliberately small Agent Harness for learning the relationship between
 
 | 任务 | 先读文档 | 主要代码 |
 | --- | --- | --- |
-| 理解 Agent 循环、上下文、会话和恢复 | [架构](docs/architecture.md) | `miniagent/context.py`、`core.py`、`api.py`、`sessions.py` |
+| 理解 Agent 循环、上下文、会话和恢复 | [架构](docs/architecture.md) | `miniagent/context.py`、`core.py`、`messages.py`、`budget.py`、`api.py`、`sessions.py` |
 | 配置模型、启动、交互命令与排错 | [使用指南](docs/usage.md) | `miniagent/config.py`、`cli.py` |
 | 文件工具、补丁、命令和后台任务 | [工具参考](docs/tools.md) | `miniagent/tools.py`、`processes.py`、`security.py` |
 | 终端显示、输入、快捷键和审批 | [终端交互](docs/terminal.md) | `miniagent/ui.py`、`input.py`、`presentation.py` |
@@ -23,9 +23,11 @@ This is a deliberately small Agent Harness for learning the relationship between
 
 ## 开发约定
 
-- Python 3.10+；核心优先使用标准库，终端直接依赖 `prompt-toolkit`。新增依赖或抽象应有明确用途，避免遮蔽学习所需的执行过程。
+- Python 3.10+；核心优先使用标准库，终端直接依赖 `prompt-toolkit`。新增依赖或抽象需改善可靠性、效率或维护成本，保持安装和分发轻量。
 - `miniagent/` 是实现，`agent.py` 是兼容入口，`tests/` 是自动验证，`docs/` 是专题说明。
 - 保持工具调用与 `tool_call_id` 对应的结果完整；恢复会话不能重放历史命令。新增工具同步维护 schema、参数校验、分派和相关测试。
+- 使用显式消息阶段区分中间输出与最终答复；不能以没有 tool call 判定结束。必需后台任务的终态必须先返回给模型。所有模型默认共用 256k token 估算窗口。
+- 当前不实现交互式子进程 stdin/PTY 或安全沙箱；按轻量工具的核心执行能力推进。
 - 文件修改和命令执行沿用现有审批边界；不要把 Shell 描述为安全沙箱。密钥不得写入日志、会话、文档或提交。
 - 行为变化同步更新对应专题；导航变化同步更新本文件与文档索引。验收记录只写实际执行过的验证，并区分历史记录与当前结果。
 - 根据改动运行相关测试；完整回归命令为 `python -m unittest discover -s tests -v`，提交前检查 `git diff --check`。

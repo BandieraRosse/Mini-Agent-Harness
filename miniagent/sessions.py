@@ -1,4 +1,4 @@
-"""Atomic checkpoints, complete tool pairs, and an inspectable conversation archive."""
+"""Append-only observations with atomic checkpoints and no execution replay."""
 
 import json
 import os
@@ -9,10 +9,53 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .security import Redactor
+from .tool_errors import tool_failure
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def journal_path(path):
+    journal = path.with_suffix('.jsonl')
+    if journal.is_symlink():
+        raise ValueError('Session journal must not be a symlink')
+    return journal
+
+
+def read_checkpoint(path):
+    if path.is_symlink() or path.stat().st_size > 32_000_000:
+        raise ValueError('Unsafe or oversized session file')
+    data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or not isinstance(data.get('messages'), list):
+        raise ValueError('Invalid session checkpoint')
+    checkpoint = data.get('_journal_seq', 0)
+    if type(checkpoint) is not int or checkpoint < 0:
+        raise ValueError('Invalid journal checkpoint sequence')
+    journal = journal_path(path)
+    if not journal.exists():
+        return data
+    if journal.stat().st_size > 32_000_000:
+        raise ValueError('Oversized session journal')
+    last = checkpoint
+    for line in journal.read_bytes().splitlines(keepends=True):
+        if not line.endswith(b'\n'):
+            break  # A crash may leave one incomplete final append, including UTF-8.
+        event = json.loads(line)
+        if not isinstance(event, dict) or type(event.get('seq')) is not int:
+            raise ValueError('Invalid session journal event')
+        sequence = event['seq']
+        if sequence <= checkpoint:
+            continue  # Snapshot committed, but old journal cleanup was interrupted.
+        if sequence != last + 1 or not isinstance(event.get('state'), dict) or not isinstance(event.get('message'), dict):
+            raise ValueError('Invalid or out-of-order session journal')
+        if set(event['state']) - {'provider', 'model', 'updated_at', 'summary', 'context_start', 'status'}:
+            raise ValueError('Invalid session journal state')
+        data.update(event['state'])
+        data['messages'].append(event['message'])
+        last = sequence
+    data['_journal_seq'] = last
+    return data
 
 
 def validate_and_repair(messages):
@@ -32,6 +75,10 @@ def validate_and_repair(messages):
             raise ValueError("User messages must contain text")
         if message.get("reasoning_content") is not None and not isinstance(message["reasoning_content"], str):
             raise ValueError("Invalid stored reasoning content")
+        if message.get("phase") is not None and (message["role"] != "assistant" or message["phase"] not in ("commentary", "final_answer")):
+            raise ValueError("Invalid stored assistant phase")
+        if 'completion_deferred' in message and (message['role'] != 'assistant' or type(message['completion_deferred']) is not bool):
+            raise ValueError('Invalid stored completion state')
         result.append(message)
         index += 1
         calls = message.get("tool_calls") or []
@@ -62,8 +109,8 @@ def validate_and_repair(messages):
         for call_id in ids:
             result.append(outputs.get(call_id, {
                 "role": "tool", "tool_call_id": call_id,
-                "content": json.dumps({"ok": False, "interrupted": True,
-                    "error": "Execution outcome unknown after interruption. Inspect current state; do not replay automatically."}),
+                "content": json.dumps(tool_failure("OUTCOME_UNKNOWN",
+                    "Execution outcome unknown after interruption. Inspect current state; do not replay automatically.", interrupted=True)),
             }))
     return result
 
@@ -73,6 +120,7 @@ class Session:
         self.workspace = Path(workspace).resolve()
         self.enabled = save
         self.redact = redact or Redactor()
+        self._pending_appends = 0
         self.data = {
             "version": 1, "id": datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8],
             "workspace": str(self.workspace), "provider": provider, "model": model,
@@ -102,6 +150,7 @@ class Session:
             return
         self.data["updated_at"] = now()
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        journal = journal_path(self.path)
         text = json.dumps(self.redact.value(self.data), ensure_ascii=False, indent=2) + "\n"
         fd, name = tempfile.mkstemp(prefix=".checkpoint-", dir=self.directory)
         try:
@@ -110,13 +159,36 @@ class Session:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(name, self.path)
+            # Sequence numbers make leftover records harmless if this cleanup
+            # fails or the process dies between checkpoint and journal removal.
+            try:
+                journal.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._pending_appends = 0
         finally:
             if os.path.exists(name):
                 os.unlink(name)
 
     def append(self, message):
         self.messages.append(self.redact.value(message))
-        self.save()
+        if not self.enabled:
+            return
+        if not self.path.exists():
+            self.save()
+            return
+        sequence = self.data.get('_journal_seq', 0) + 1
+        self.data.update(_journal_seq=sequence, updated_at=now())
+        state = {key: self.data[key] for key in ('provider', 'model', 'updated_at', 'summary', 'context_start', 'status')}
+        event = self.redact.value({'seq': sequence, 'message': self.messages[-1], 'state': state})
+        fd = os.open(journal_path(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, 'a', encoding='utf-8', newline='\n') as stream:
+            stream.write(json.dumps(event, ensure_ascii=False) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        self._pending_appends += 1
+        if self._pending_appends >= 32:
+            self.save()
 
     def active_messages(self):
         history = self.messages[self.data["context_start"]:]
@@ -138,11 +210,7 @@ class Session:
             if path.is_symlink():
                 continue
             try:
-                if path.stat().st_size > 32_000_000:
-                    continue
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
-                    continue
+                data = read_checkpoint(path)
                 title = next((m.get("content", "") for m in data["messages"]
                               if isinstance(m, dict) and m.get("role") == "user"), "")
                 if not isinstance(title, str) or not isinstance(data.get("updated_at", ""), str):
@@ -161,9 +229,7 @@ class Session:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", identifier):
             raise ValueError("Use a session ID from /sessions")
         path = self.directory / f"{identifier}.json"
-        if path.is_symlink() or path.stat().st_size > 32_000_000:
-            raise ValueError("Unsafe or oversized session file")
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_checkpoint(path)
         if not isinstance(data, dict) or data.get("version") != 1 or data.get("id") != identifier:
             raise ValueError("Unsupported or invalid session")
         if not isinstance(data.get("workspace"), str) or Path(data["workspace"]).resolve() != self.workspace:

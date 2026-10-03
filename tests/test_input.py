@@ -27,7 +27,7 @@ class TextBoundaryTests(unittest.TestCase):
     def test_common_commands_are_prominent_and_legacy_commands_documented(self):
         self.assertEqual([command.name for command in COMMANDS[:5]], ["clear", "resume", "status", "model", "permissions"])
         self.assertIn("/exit", help_text())
-        self.assertIn("/permissions [ask|trust]", help_text())
+        self.assertIn("/permissions [ask|trust|read-only|rules|reset]", help_text())
         self.assertNotIn("/diff", help_text())
 
 

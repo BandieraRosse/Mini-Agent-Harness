@@ -31,7 +31,7 @@ COMMANDS = (
     Command("resume", "选择并恢复已保存的会话", "[ID|latest]", ("latest",)),
     Command("status", "查看模型、权限和会话状态"),
     Command("model", "查看或切换模型", "[名称]"),
-    Command("permissions", "查看或切换操作权限", "[ask|trust]", ("ask", "trust"), ("approval",)),
+    Command("permissions", "查看或切换操作权限", "[ask|trust|read-only|rules|reset]", ("ask", "trust", "read-only", "rules", "reset"), ("approval",)),
     Command("new", "开始新会话，保留旧会话供恢复"),
     Command("compact", "压缩较早的对话上下文"),
     Command("help", "显示命令和快捷键"),

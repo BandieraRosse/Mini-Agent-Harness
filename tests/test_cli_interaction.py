@@ -96,7 +96,7 @@ class CLIInteractionTests(unittest.TestCase):
             status, _, _, _ = self.invoke("/permissions\nwrite allowed\n/quit\n",
                                           [create_call("allowed", "selected.txt"), completion()], ["--no-save"])
         self.assertEqual(status, 0)
-        self.assertEqual([item[0] for item in choose.call_args.args[1]], ["ask", "trust"])
+        self.assertEqual([item[0] for item in choose.call_args.args[1]], ["ask", "trust", "read-only"])
         self.assertTrue((self.workspace / "selected.txt").exists())
 
     def test_resume_latest_resolves_saved_session_before_saving_current(self):
@@ -129,6 +129,17 @@ class CLIInteractionTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertIn("模型: deepseek/model-after", output)
         self.assertIn("40 in | 10 out", output)
+
+    def test_read_only_rejects_stale_mutating_call_until_permissions_change(self):
+        status, _, requests, _ = self.invoke(
+            'inspect\n/permissions trust\nwrite\n/quit\n',
+            [create_call('denied', 'denied.txt'), completion('permission needed'),
+             create_call('allowed', 'allowed.txt'), completion('created')], ['--read-only', '--no-save'])
+        self.assertEqual(status, 0)
+        self.assertFalse((self.workspace / 'denied.txt').exists())
+        self.assertTrue((self.workspace / 'allowed.txt').exists())
+        result = next(m for m in requests[1]['messages'] if m['role'] == 'tool')
+        self.assertEqual(json.loads(result['content'])['error_code'], 'PERMISSION_DENIED')
 
 
 if __name__ == "__main__":

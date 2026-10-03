@@ -94,15 +94,108 @@ class ProcessManagerTests(unittest.TestCase):
         self.assertTrue("Core" in result["output"] or "Desktop" in result["output"])
 
     def test_capture_limit_is_bounded_and_explicit(self):
-        result = self.manager.run(python_command("import sys;sys.stdout.write('x'*2000000)"))
+        result = self.manager.run(python_command("import sys;sys.stdout.write('x'*1999996+'DONE')"))
         self.assertTrue(result["output_limit_reached"])
         self.assertEqual(result["captured_bytes"], processes.MAX_CAPTURE_BYTES)
         self.assertEqual(result["dropped_bytes"], 2000000 - processes.MAX_CAPTURE_BYTES)
         self.assertLessEqual(len(result["output"]), processes.PAGE_BYTES)
-        final_page = self.manager.poll(result["job_id"], result["captured_bytes"])
+        self.assertTrue(result["output_tail"].endswith("DONE"))
+        self.assertEqual(result["total_bytes"], 2000000)
+        omitted = result["omitted_range"]
+        self.assertEqual(omitted["end"] - omitted["start"], result["dropped_bytes"])
+        tail_page = self.manager.poll(result["job_id"], omitted["start"])
+        self.assertEqual(tail_page["offset"], omitted["end"])
+        self.assertEqual(tail_page["skipped_range"], omitted)
+        final_page = self.manager.poll(result["job_id"], result["total_bytes"])
         self.assertTrue(final_page["truncated"])
         self.assertFalse(final_page["has_more"])
         self.assertEqual(final_page["output"], "")
+
+    def test_rolling_tail_preserves_absolute_unicode_offsets_and_budget(self):
+        job = processes._Job("synthetic", mock.Mock(returncode=None), self.workspace, 10, None)
+        self.manager._jobs[job.job_id] = job
+        job.done.set()  # No real process; avoid process cleanup in tearDown.
+        job.process.returncode = 0
+        expected = "HEADER\n" + "你好🙂" * 300 + self.secret + "FINAL"
+        with mock.patch.object(processes, "MAX_CAPTURE_BYTES", 512):
+            self.manager._append(job, expected)
+            first = self.manager.poll(job.job_id, max_output_bytes=256)
+            self.assertTrue(first["output"].startswith("HEADER"))
+            self.assertTrue(first["output_tail"].endswith("[REDACTED]FINAL"))
+            old_cursor = first["tail_start_offset"]
+            self.manager._append(job, "世界🙂" * 100 + "LATEST")
+            result = self.manager.poll(job.job_id, old_cursor, max_output_bytes=256)
+            self.assertIn("skipped_range", result)
+            source = (self.manager._safe(expected) + "世界🙂" * 100 + "LATEST").encode()
+            self.assertEqual(source[result["offset"]:result["next_offset"]].decode(), result["output"])
+            head = self.manager.poll(job.job_id, max_output_bytes=256)
+            self.assertLessEqual(len(head["output"].encode()) + len(head["output_tail"].encode()), 256)
+            self.assertLessEqual(head["captured_bytes"], 512)
+            self.assertEqual(head["total_bytes"], len(source))
+            self.assertNotIn(self.secret, json.dumps(head))
+            self.assertNotIn("\ufffd", head["output"] + head["output_tail"])
+            self.assertEqual(source[head["output_tail_offset"]:].decode(), head["output_tail"])
+
+    def test_yield_returns_live_job_without_replaying_or_changing_deadline(self):
+        command = python_command("import time;open('once','a').write('x');time.sleep(.3);print('done')")
+        result = self.manager.run(command, yield_time_ms=0, timeout=5)
+        self.assertEqual(result["status"], "running")
+        job_id = result["job_id"]
+        result = self.wait_for(job_id, lambda r: r["complete"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((self.workspace / "once").read_text(), "x")
+        self.assertEqual(len(self.approvals), 1)
+        self.assertEqual(self.manager._jobs[job_id].timeout, 5)
+
+    def test_waiting_poll_returns_new_output_and_then_completion(self):
+        source = ("from pathlib import Path;import time;print('ready',flush=True);"
+                  "\nwhile not Path('release').exists(): time.sleep(.01)"
+                  "\nprint('next',flush=True)")
+        started = self.manager.run(python_command(source), yield_time_ms=0)
+        ready = self.wait_for(started["job_id"], lambda r: "ready" in r["output"])
+        timer = threading.Timer(.15, lambda: (self.workspace / "release").touch())
+        timer.start()
+        try:
+            before = time.monotonic()
+            result = self.manager.poll(started["job_id"], ready["next_offset"], wait_ms=3000)
+            self.assertGreaterEqual(time.monotonic() - before, .1)
+            self.assertIn("next", result["output"])
+            final = self.manager.poll(started["job_id"], result["next_offset"], wait_ms=3000)
+            self.assertTrue(final["complete"])
+        finally:
+            timer.join()
+
+    def test_poll_wait_is_bounded_and_cancellable(self):
+        started = self.manager.run(python_command("import time;time.sleep(10)"), yield_time_ms=0)
+        before = time.monotonic()
+        quiet = self.manager.poll(started["job_id"], wait_ms=100)
+        self.assertGreaterEqual(time.monotonic() - before, .08)
+        self.assertEqual(quiet["status"], "running")
+        self.manager.cancel_event = threading.Event()
+        timer = threading.Timer(.1, self.manager.cancel_event.set)
+        timer.start()
+        try:
+            before = time.monotonic()
+            with self.assertRaises(KeyboardInterrupt):
+                self.manager.poll(started["job_id"], wait_ms=60_000)
+            self.assertLess(time.monotonic() - before, 3)
+            self.assertEqual(self.manager._jobs[started["job_id"]].reason, "cancelled")
+        finally:
+            timer.join()
+            self.manager.cancel_event.clear()
+
+    def test_command_failure_codes_and_options_validation(self):
+        failed = self.manager.run(python_command("raise SystemExit(4)"))
+        self.assertEqual(failed["error_code"], "COMMAND_FAILED")
+        self.assertFalse(failed["retryable"])
+        self.assertIn("output", failed["next_action"])
+        for kwargs in [{"yield_time_ms": True}, {"yield_time_ms": -1}, {"max_output_bytes": 1}]:
+            result = self.manager.run("echo never", **kwargs)
+            self.assertEqual(result["error_code"], "INVALID_ARGUMENT")
+        for kwargs in [{"wait_ms": 60001}, {"max_output_bytes": True}]:
+            self.assertEqual(self.manager.poll(failed["job_id"], **kwargs)["error_code"], "INVALID_ARGUMENT")
+        timeout = self.manager.run(python_command("import time;time.sleep(10)"), timeout=.1)
+        self.assertEqual(timeout["error_code"], "COMMAND_TIMEOUT")
 
     def test_approval_denial_never_runs_command(self):
         self.manager.approve = lambda kind, details: False

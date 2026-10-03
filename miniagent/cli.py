@@ -11,6 +11,7 @@ from .api import APIError, ChatClient
 from .config import Config, load_api_key
 from .context import fixed_messages
 from .core import Agent
+from .budget import CONTEXT_TOKENS
 from .processes import ProcessManager
 from .security import Redactor
 from .sessions import Session
@@ -35,8 +36,11 @@ def parser():
     result.add_argument("--base-url", help="Chat Completions base URL, e.g. https://api.openai.com/v1")
     result.add_argument("--timeout", type=positive_int, default=120, help="HTTP timeout in seconds")
     result.add_argument("--max-rounds", type=positive_int, default=40)
-    result.add_argument("--context-chars", type=positive_int, default=60_000, help="Approximate context size in characters")
-    result.add_argument("--trust", action="store_true", help="Approve commands and edits for this invocation")
+    result.add_argument("--context-tokens", type=positive_int, default=CONTEXT_TOKENS, help="Context window in estimated tokens, default 256000")
+    result.add_argument("--context-chars", type=positive_int, default=None, help="Legacy character-budget override; prefer --context-tokens")
+    permissions = result.add_mutually_exclusive_group()
+    permissions.add_argument("--trust", action="store_true", help="Approve commands and edits for this invocation")
+    permissions.add_argument("--read-only", action="store_true", help="Allow inspection tools only; disable edits and shell commands")
     result.add_argument("--no-save", action="store_true", help="Keep this session only in memory")
     result.add_argument("--resume", nargs="?", const="latest", metavar="ID")
     result.add_argument("--list-sessions", action="store_true")
@@ -55,13 +59,15 @@ def main(argv=None):
     args = argparser.parse_args(argv)
     if args.task and args.prompt:
         argparser.error("use either a positional task or --prompt")
-    if args.context_chars < 16_000:
+    if args.context_chars is not None and args.context_chars < 16_000:
         argparser.error("--context-chars must be at least 16000")
+    if args.context_tokens < 16_384:
+        argparser.error("--context-tokens must be at least 16384")
     workspace = args.workspace.resolve()
     if not workspace.is_dir():
         argparser.error("workspace must be an existing directory")
     processes = None
-    ui = Terminal(Redactor(), approval="trust" if args.trust else "ask", plain=args.plain)
+    ui = Terminal(Redactor(), approval="read-only" if args.read_only else "trust" if args.trust else "ask", plain=args.plain)
     ui.detailed = args.verbose
     try:
         config = Config(provider=args.provider, model=args.model, base_url=args.base_url, timeout=args.timeout)
@@ -83,14 +89,15 @@ def main(argv=None):
             ui.completer.choices["model"] = lambda: known_models
             ui.completer.choices["resume"] = lambda: ["latest", *[item["id"] for item in session.list_saved()[:30]]]
         processes = ProcessManager(workspace, ui.approve, redact, secrets=(key,))
-        registry = ToolRegistry(workspace, processes, ui.approve, redact)
+        registry = ToolRegistry(workspace, processes, ui.approve, redact, lambda: ui.approval)
         if args.resume:
             session.load(args.resume)
             session.data.update(provider=config.provider, model=config.model)
             session.save()
             ui.restore(session.messages)
             ui.notice(f"已恢复 {session.data['id']}；后台任务不跨进程恢复。")
-        agent = Agent(client, session, registry, redact.value(fixed), ui, args.max_rounds, args.context_chars)
+        agent = Agent(client, session, registry, redact.value(fixed), ui, args.max_rounds, args.context_chars,
+                      args.context_tokens)
         task = args.prompt or args.task
         if task:
             return 0 if ui.run_action(lambda: agent.run(task), client=client, processes=processes) else 1
@@ -111,7 +118,8 @@ def main(argv=None):
                         session.save()
                         processes.close()
                         processes = ProcessManager(workspace, ui.approve, redact, secrets=(key,))
-                        registry = ToolRegistry(workspace, processes, ui.approve, redact)
+                        registry = ToolRegistry(workspace, processes, ui.approve, redact, lambda: ui.approval)
+                        ui.approval_rules.clear()
                         session = Session(workspace, config.provider, config.model, save=not args.no_save, redact=redact)
                         agent.session, agent.tools = session, registry
                         ui.clear_history(clear_screen=command == "/clear")
@@ -136,7 +144,8 @@ def main(argv=None):
                         candidate.save()
                         processes.close()
                         processes = ProcessManager(workspace, ui.approve, redact, secrets=(key,))
-                        registry = ToolRegistry(workspace, processes, ui.approve, redact)
+                        registry = ToolRegistry(workspace, processes, ui.approve, redact, lambda: ui.approval)
+                        ui.approval_rules.clear()
                         session = candidate
                         agent.session, agent.tools = session, registry
                         ui.restore(session.messages)
@@ -152,11 +161,19 @@ def main(argv=None):
                             argument = ui.choose(f"权限 · 当前 {ui.approval}", [
                                 ("ask", "ask — 每次文件修改和命令执行前确认"),
                                 ("trust", "trust — 信任当前项目会话（Shell 使用当前用户权限）"),
+                                ("read-only", "read-only — 仅允许读取，不执行命令或修改文件"),
                             ])
                             if not argument:
                                 continue
-                        if argument not in {"ask", "trust"}:
-                            raise ValueError("用法：/permissions ask|trust")
+                        if argument == 'rules':
+                            ui.print('\n\n'.join(detail for _, detail in sorted(ui.approval_rules)) or '没有记住的命令。')
+                            continue
+                        if argument == 'reset':
+                            ui.approval_rules.clear()
+                            ui.notice('已清除本会话记住的命令。')
+                            continue
+                        if argument not in {"ask", "trust", "read-only"}:
+                            raise ValueError("用法：/permissions ask|trust|read-only|rules|reset")
                         ui.approval = argument
                         ui.notice(f"权限模式: {argument}")
                     elif command == "/model":
@@ -189,6 +206,8 @@ def main(argv=None):
                         ui.print(f"目录: {workspace}\n模型: {config.provider}/{config.model}\n权限: {ui.approval}\n"
                                  f"会话: {session.data['id']}\n状态: {session.data['status']}\n"
                                  f"消息数: {len(session.messages)}\n保存: {session.enabled}")
+                        ui.print(f"上下文窗口: {args.context_tokens} estimated tokens | 输入预算: {agent.input_budget}" +
+                                 (' chars (legacy override)' if args.context_chars is not None else ' estimated tokens'))
                         ui.print(f"本次运行 tokens: {ui.tokens['prompt']} in | {ui.tokens['completion']} out")
                     elif command == "/paste" and ui.editor:
                         ui.notice("增强输入支持 Alt+Enter/Ctrl+J 换行，也可直接粘贴多行。")
@@ -200,7 +219,7 @@ def main(argv=None):
                 ui.end_stream()
                 processes.close()
                 processes = ProcessManager(workspace, ui.approve, redact, secrets=(key,))
-                registry = ToolRegistry(workspace, processes, ui.approve, redact)
+                registry = ToolRegistry(workspace, processes, ui.approve, redact, lambda: ui.approval)
                 agent.tools = registry
                 ui.notice("当前工作已中断；可以继续输入。后台任务已停止。")
             except EOFError:

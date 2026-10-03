@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 from miniagent.tools import MAX_OUTPUT_CHARS, ToolRegistry
 
@@ -13,8 +15,8 @@ class FakeProcesses:
     def run(self, **kwargs):
         return {"ok": True, "called": "run", **kwargs}
 
-    def poll(self, job_id, offset=0):
-        return {"ok": True, "called": "poll", "job_id": job_id, "offset": offset}
+    def poll(self, job_id, offset=0, **kwargs):
+        return {"ok": True, "called": "poll", "job_id": job_id, "offset": offset, **kwargs}
 
     def cancel(self, job_id):
         return {"ok": True, "called": "cancel", "job_id": job_id}
@@ -24,6 +26,29 @@ class FakeProcesses:
 
 
 class ToolTests(unittest.TestCase):
+    def test_context_patch_locates_unique_text_and_rejects_ambiguity(self):
+        target = self.write("a.txt", b"unrelated\r\nfirst\r\nold\r\nlast\r\n")
+        patch_text = "*** Begin Patch\n*** Update File: a.txt\n@@\n first\n-old\n+new\n last\n*** End Patch\n"
+        result = self.call("apply_patch", patch=patch_text)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(target.read_bytes(), b"unrelated\r\nfirst\r\nnew\r\nlast\r\n")
+        self.write("a.txt", b"same\nsame\n")
+        ambiguous = "*** Begin Patch\n*** Update File: a.txt\n@@\n-same\n+changed\n*** End Patch\n"
+        self.assertEqual(self.call("apply_patch", patch=ambiguous)["error_code"], "PATCH_CONTEXT_MISMATCH")
+        self.assertEqual(target.read_bytes(), b"same\nsame\n")
+
+    def test_approval_time_external_edit_is_preserved(self):
+        target = self.write("a.txt", b"old\n")
+
+        def approve(*args):
+            target.write_bytes(b"user changed\n")
+            return True
+
+        self.registry.approve = approve
+        result = self.call("replace_text", path="a.txt", old_text="old", new_text="agent")
+        self.assertEqual(result["error_code"], "EDIT_CONFLICT")
+        self.assertEqual(target.read_bytes(), b"user changed\n")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -279,6 +304,99 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(self.call("poll_command", job_id="job1", offset=20)["offset"], 20)
         self.assertEqual(self.call("cancel_command", job_id="job1")["called"], "cancel")
         self.assertFalse(self.call("run_command", command="echo hello", cwd="../")["ok"])
+
+    def test_search_filters_single_file_context_and_unique_file_paging(self):
+        self.write("root.py", b"before\nneedle\nafter SECRET\nneedle\n")
+        self.write("src/one.py", b"needle\nneedle\n")
+        self.write("src/skip.py", b"needle\n")
+        self.write("notes.txt", b"needle\n")
+        single = self.call("search_text", query="needle", path="root.py", context_lines=1)
+        self.assertEqual([m["line"] for m in single["matches"]], [2, 4])
+        self.assertEqual(single["matches"][0]["context"], [
+            {"line": 1, "text": "before", "line_truncated": False},
+            {"line": 3, "text": "after [redacted]", "line_truncated": False}])
+        options = dict(query="needle", include_glob="**/*.py", exclude_glob="**/skip.py", files_only=True, limit=1)
+        first = self.call("search_text", **options)
+        second = self.call("search_text", offset=first["next_offset"], **options)
+        self.assertEqual(first["files"] + second["files"], ["root.py", "src/one.py"])
+        self.assertTrue(first["truncated"])
+        self.assertFalse(second["truncated"])
+        self.assertEqual(second["next_offset"], 2)
+
+    def test_search_context_remains_bounded_and_protected_paths_stay_denied(self):
+        self.write("long.py", (("SECRET" * 500 + "needle\n") * 60).encode())
+        result = self.call("search_text", query="needle", context_lines=5)
+        self.assertTrue(result["truncated"])
+        self.assertNotIn("SECRET", json.dumps(result))
+        self.assertGreater(result["next_offset"], 0)
+        total = sum(len(row["text"]) + sum(len(c["text"]) for c in row["context"]) for row in result["matches"])
+        self.assertLessEqual(total, MAX_OUTPUT_CHARS)
+        for path in [".env", "../outside", ".git/config"]:
+            denied = self.call("search_text", query="x", path=path, include_glob="*")
+            self.assertEqual(denied["error_code"], "PATH_DENIED")
+        self.assertEqual(self.call("search_text", query="x", context_lines=6)["error_code"], "INVALID_ARGUMENT")
+
+    def test_search_cancels_during_scan_and_next_call_can_continue(self):
+        for index in range(10):
+            self.write(f"{index}.py", b"needle\n")
+        event = threading.Event()
+        self.registry.process_manager.cancel_event = event
+        original_read = self.registry._read
+
+        def interrupting_read(path):
+            result = original_read(path)
+            event.set()
+            return result
+
+        with mock.patch.object(self.registry, "_read", side_effect=interrupting_read) as reader:
+            with self.assertRaises(KeyboardInterrupt):
+                self.call("search_text", query="needle")
+            self.assertEqual(reader.call_count, 1)
+        event.clear()
+        self.assertEqual(len(self.call("search_text", query="needle")["matches"]), 10)
+
+    def test_error_codes_distinguish_conflicts_denials_and_partial_writes(self):
+        self.write("a.txt", b"old\n")
+        self.write("b.txt", b"old\n")
+        conflict = self.call("replace_text", path="a.txt", old_text="missing", new_text="new")
+        self.assertEqual(conflict["error_code"], "EDIT_CONFLICT")
+        mismatch = self.call("apply_patch", patch="--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-wrong\n+new\n")
+        self.assertEqual(mismatch["error_code"], "PATCH_CONTEXT_MISMATCH")
+        self.registry.approve = lambda *args: False
+        denied = self.call("replace_text", path="a.txt", old_text="old", new_text="new")
+        self.assertEqual(denied["error_code"], "APPROVAL_DENIED")
+        self.assertFalse(denied["retryable"])
+        self.registry.approve = self.approve
+        original_replace = os.replace
+        calls = 0
+
+        def fail_second(source, target):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("SECRET simulated failure")
+            original_replace(source, target)
+
+        patch = "".join(f"--- a/{name}.txt\n+++ b/{name}.txt\n@@ -1 +1 @@\n-old\n+new\n" for name in ["a", "b"])
+        with mock.patch("miniagent.tools.os.replace", side_effect=fail_second):
+            partial = self.call("apply_patch", patch=patch)
+        self.assertEqual(partial["error_code"], "PARTIAL_WRITE")
+        self.assertEqual(partial["applied_files"], ["a.txt"])
+        self.assertNotIn("SECRET", json.dumps(partial))
+        self.assertEqual((self.root / "b.txt").read_bytes(), b"old\n")
+
+    def test_file_approval_error_and_cancel_never_write(self):
+        self.registry.approve = mock.Mock(side_effect=RuntimeError("SECRET approval failed"))
+        result = self.call("create_file", path="new.txt", content="new")
+        self.assertEqual(result["error_code"], "APPROVAL_FAILED")
+        self.assertNotIn("SECRET", json.dumps(result))
+        self.assertFalse((self.root / "new.txt").exists())
+        event = threading.Event()
+        self.registry.process_manager.cancel_event = event
+        self.registry.approve = lambda *args: event.set() or True
+        with self.assertRaises(KeyboardInterrupt):
+            self.call("create_file", path="new.txt", content="new")
+        self.assertFalse((self.root / "new.txt").exists())
 
 
 if __name__ == "__main__":

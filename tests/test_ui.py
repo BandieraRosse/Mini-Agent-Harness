@@ -57,6 +57,37 @@ class UITests(unittest.TestCase):
         self.assertEqual(terminal_text("\x1b]0;untrusted title\x07safe"), "safe")
         self.assertEqual(terminal_text("\x9b31mtext\x9c"), "31mtext")
 
+    def test_remembered_approval_matches_full_command_and_cwd_only(self):
+        terminal = Terminal(Redactor(), plain=True)
+        terminal.tty = True
+        original = 'cwd: C:/project\ncommand: python test.py'
+        with contextlib.redirect_stdout(io.StringIO()), patch('builtins.input', side_effect=['a', 'n', 'n']) as ask:
+            self.assertTrue(terminal.approve('shell', original))
+            self.assertTrue(terminal.approve('shell', original))
+            self.assertFalse(terminal.approve('shell', original + ' --other'))
+            self.assertFalse(terminal.approve('shell', original.replace('C:/project', 'C:/elsewhere')))
+        self.assertEqual(ask.call_count, 3)
+        terminal.approval = 'read-only'
+        self.assertFalse(terminal.approve('shell', original))
+        terminal.approval = 'ask'
+        terminal.approval_rules.clear()
+        with contextlib.redirect_stdout(io.StringIO()), patch('builtins.input', return_value='n'):
+            self.assertFalse(terminal.approve('shell', original))
+
+    def test_redacted_commands_and_file_edits_cannot_be_remembered(self):
+        terminal = Terminal(Redactor(), plain=True)
+        terminal.tty = True
+        with contextlib.redirect_stdout(io.StringIO()), patch('builtins.input', return_value='a'):
+            self.assertFalse(terminal.approve('shell', 'echo [REDACTED]'))
+            self.assertFalse(terminal.approve('file', 'diff'))
+        self.assertEqual(terminal.approval_rules, set())
+
+    def test_restore_suppresses_deferred_final_draft(self):
+        terminal = Terminal(Redactor(), plain=True)
+        terminal.restore([{'role': 'assistant', 'phase': 'final_answer',
+                           'content': 'Premature success', 'completion_deferred': True}])
+        self.assertNotIn('Premature success', ''.join(text for _, text in terminal.fragments()))
+
     def test_restored_invalid_tool_arguments_can_be_viewed(self):
         terminal = Terminal(Redactor(), plain=True)
         terminal.restore([

@@ -15,6 +15,8 @@ import stat
 import tempfile
 from typing import Any, Callable
 
+from .tool_errors import ToolError, tool_failure
+
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_OUTPUT_CHARS = 24_000
@@ -29,10 +31,6 @@ BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".z
 _HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?\Z")
 
 
-class ToolError(ValueError):
-    """An actionable tool failure suitable for returning to the model."""
-
-
 def _schema(name: str, description: str, properties: dict, required: list[str]) -> dict:
     return {"type": "function", "function": {"name": name, "description": description,
             "parameters": {"type": "object", "properties": properties,
@@ -44,6 +42,10 @@ def _string(description: str) -> dict:
 
 
 SCHEMAS = [
+    _schema("read_tool_result", "Read the full archived result behind a context-truncated result_ref; never executes the original tool again.",
+            {"tool_call_id": _string("Original call ID / result_ref"),
+             "offset": {"type": "integer", "minimum": 0, "description": "Character offset, default 0"},
+             "limit": {"type": "integer", "minimum": 1, "maximum": 24000}}, ["tool_call_id"]),
     _schema("list_directory", "List workspace entries; excludes secrets and generated directories.",
             {"path": _string("Relative directory, default '.'"),
              "offset": {"type": "integer", "minimum": 0},
@@ -53,9 +55,13 @@ SCHEMAS = [
              "path": _string("Directory to search, default '.'"),
              "offset": {"type": "integer", "minimum": 0},
              "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
-    _schema("search_text", "Search literal text in UTF-8 files; returns bounded line matches.",
-            {"query": _string("Nonempty literal text"), "path": _string("Directory, default '.'"),
+    _schema("search_text", "Search literal text in UTF-8 files; narrow with path/globs. Returns bounded matches or unique paths.",
+            {"query": _string("Nonempty literal text"), "path": _string("File or directory, default '.'"),
              "case_sensitive": {"type": "boolean"},
+             "include_glob": _string("Include workspace-relative paths matching this glob; default '*'"),
+             "exclude_glob": _string("Exclude workspace-relative paths matching this glob; default none"),
+             "context_lines": {"type": "integer", "minimum": 0, "maximum": 5},
+             "files_only": {"type": "boolean", "description": "Return unique files, not line matches; offset counts files"},
              "offset": {"type": "integer", "minimum": 0},
              "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, ["query"]),
     _schema("read_file", "Read line-numbered UTF-8 text. Continue with next_offset/next_column when truncated.",
@@ -69,15 +75,20 @@ SCHEMAS = [
             {"path": _string("Workspace-relative file"), "old_text": _string("Nonempty unique existing text"),
              "new_text": _string("Replacement text")},
             ["path", "old_text", "new_text"]),
-    _schema("apply_patch", "Apply strict unified diff to existing files, with exact context and no fuzz. All files are preflighted before writing. No renames/additions/deletions; use create_file for additions.",
-            {"patch": _string("Unified diff using --- a/path and +++ b/path headers")},
+    _schema("apply_patch", "Edit existing files using unique exact context, without line numbers: *** Begin Patch, *** Update File: path, @@, space/minus/plus lines, *** End Patch. Strict unified diff also supported. All files are preflighted; ambiguous context fails. Use create_file for new files.",
+            {"patch": _string("Context patch (preferred) or strict unified diff; no renames/additions/deletions")},
             ["patch"]),
-    _schema("run_command", "Run a shell command after user approval. Use background for long work, then poll_command. Commands run with user permissions.",
+    _schema("run_command", "Run an approved shell command. Returns when complete or yield_time_ms elapses; poll running jobs to completion. Commands run with user permissions.",
             {"command": _string("Shell command"), "cwd": _string("Workspace-relative directory, default '.'"),
              "timeout": {"type": "number", "minimum": 0, "maximum": 86400, "description": "Positive seconds before termination, default 120"},
-             "background": {"type": "boolean"}}, ["command"]),
-    _schema("poll_command", "Read a background job's output without rerunning it; continue from next_offset.",
-            {"job_id": _string("ID from run_command"), "offset": {"type": "integer", "minimum": 0}}, ["job_id"]),
+             "background": {"type": "boolean", "description": "Compatibility shortcut for yield_time_ms=0"},
+             "purpose": {"type": "string", "enum": ["task", "service"], "description": "Default task: completion must be observed before final answer. service: intentional long-lived server, never tests/builds; stops when MiniAgent exits."},
+             "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 60000, "description": "Wait before returning, default 10000; separate from process timeout"},
+             "max_output_bytes": {"type": "integer", "minimum": 256, "maximum": 65536, "description": "Combined UTF-8 budget for output and output_tail, default 16384"}}, ["command"]),
+    _schema("poll_command", "Read an existing job without rerunning. Use next_offset; wait_ms waits for new output or completion. Omitted ranges are explicit; output_tail is a separate latest preview.",
+            {"job_id": _string("ID from run_command"), "offset": {"type": "integer", "minimum": 0},
+             "wait_ms": {"type": "integer", "minimum": 0, "maximum": 60000, "description": "Default 1000; use longer waits for quiet jobs"},
+             "max_output_bytes": {"type": "integer", "minimum": 256, "maximum": 65536}}, ["job_id"]),
     _schema("cancel_command", "Cancel a known running job and its child processes.",
             {"job_id": _string("ID from run_command")}, ["job_id"]),
 ]
@@ -95,11 +106,11 @@ def _newline(text: str) -> str:
 
 def _text(data: bytes) -> str:
     if b"\x00" in data:
-        raise ToolError("Binary files are not supported by text tools.")
+        raise ToolError("Binary files are not supported by text tools.", "UNSUPPORTED_FILE")
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ToolError("File is not UTF-8 text; use a shell command for other encodings.") from exc
+        raise ToolError("File is not UTF-8 text; use a shell command for other encodings.", "UNSUPPORTED_FILE") from exc
 
 
 def _bounded_text(value: str, limit: int = MAX_OUTPUT_CHARS) -> str:
@@ -131,26 +142,69 @@ def _glob_matches(relative: str, pattern: str) -> bool:
 
 
 class ToolRegistry:
+    parallel_safe = frozenset({"list_directory", "find_files", "search_text", "read_file", "read_tool_result"})
     def __init__(self, workspace: Path, process_manager: Any,
-                 approve: Callable[[str, str], bool], redact: Callable[[str], str]):
+                 approve: Callable[[str, str], bool], redact: Callable[[str], str], permission_mode=None):
         self.workspace = Path(workspace).resolve(strict=True)
         if not self.workspace.is_dir():
             raise ValueError("Workspace must be a directory.")
         self.process_manager = process_manager
         self.approve = approve
         self.redact = redact
-        self.schemas = SCHEMAS
+        self.permission_mode = permission_mode or (lambda: 'ask')
         self._specs = {schema["function"]["name"]: schema["function"]["parameters"] for schema in SCHEMAS}
+        self.session = None
+
+    @property
+    def schemas(self):
+        if self.permission_mode() == 'read-only':
+            return [schema for schema in SCHEMAS if schema['function']['name'] in self.parallel_safe | {'poll_command'}]
+        return SCHEMAS
+
+    def bind_session(self, session):
+        self.session = session
+
+    def _read_tool_result(self, tool_call_id: str, offset: int = 0, limit: int = 8000):
+        if self.session is not None:
+            for item in reversed(self.session.messages):
+                if item.get("role") == "tool" and item.get("tool_call_id") == tool_call_id:
+                    content = item["content"]
+                    if offset > len(content):
+                        raise ToolError("offset exceeds the archived result.", "INVALID_OFFSET")
+                    end = min(len(content), offset + limit)
+                    return {"ok": True, "tool_call_id": tool_call_id, "content": content[offset:end],
+                            "next_offset": end, "truncated": end < len(content), "total_chars": len(content)}
+        raise ToolError("No archived result for this tool_call_id.", "NOT_FOUND")
 
     def execute(self, name: str, arguments: dict) -> dict:
         try:
             if not isinstance(name, str) or name not in self._specs:
-                raise ToolError("Unknown tool name.")
+                raise ToolError("Unknown tool name.", "UNKNOWN_TOOL")
+            if self.permission_mode() == 'read-only' and name not in self.parallel_safe | {'poll_command'}:
+                raise ToolError("This operation is unavailable in read-only mode.", "PERMISSION_DENIED")
             self._validate(name, arguments)
+            self._check_cancelled()
             result = getattr(self, "_" + name)(**arguments)
             return self._redact(result)
         except (ToolError, OSError, ValueError, TypeError) as exc:
-            return {"ok": False, "error": _bounded_text(self.redact(str(exc)), 2000)}
+            code = exc.code if isinstance(exc, ToolError) else (
+                "FILE_EXISTS" if isinstance(exc, FileExistsError) else
+                "NOT_FOUND" if isinstance(exc, FileNotFoundError) else
+                "IO_ERROR" if isinstance(exc, OSError) else "INVALID_ARGUMENT")
+            return tool_failure(code, _bounded_text(self.redact(str(exc)), 2000))
+
+    def _check_cancelled(self) -> None:
+        event = getattr(self.process_manager, "cancel_event", None)
+        if event is not None and event.is_set():
+            raise KeyboardInterrupt()
+
+    def _approve_file(self, detail: str) -> bool:
+        try:
+            approved = self.approve("file", self.redact(detail))
+        except Exception as exc:
+            raise ToolError(f"File approval failed: {exc}", "APPROVAL_FAILED") from exc
+        self._check_cancelled()
+        return approved
 
     def _redact(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -180,6 +234,8 @@ class ToolRegistry:
                      or (kind == "object" and isinstance(value, dict)))
             if not valid:
                 raise ToolError(f"{key} must be {kind}.")
+            if "enum" in rule and value not in rule["enum"]:
+                raise ToolError(f"{key} must be one of {rule['enum']}.")
             if kind == "number" and not math.isfinite(value):
                 raise ToolError(f"{key} must be finite.")
             if "minimum" in rule and value < rule["minimum"]:
@@ -194,21 +250,21 @@ class ToolRegistry:
             raise ToolError("Path must be nonempty and contain no NUL characters.")
         raw = Path(value)
         if ".." in raw.parts:
-            raise ToolError("Parent traversal ('..') is not allowed.")
+            raise ToolError("Parent traversal ('..') is not allowed.", "PATH_DENIED")
         candidate = raw if raw.is_absolute() else self.workspace / raw
         try:
             lexical = candidate.relative_to(self.workspace)
             resolved = candidate.resolve(strict=False)
             relative = resolved.relative_to(self.workspace)
         except (ValueError, RuntimeError) as exc:
-            raise ToolError("Path is outside the workspace or traverses an invalid symlink.") from exc
+            raise ToolError("Path is outside the workspace or traverses an invalid symlink.", "PATH_DENIED") from exc
         if _protected(lexical.parts) or _protected(relative.parts):
-            raise ToolError("Protected secret, Git metadata, or session path is unavailable.")
+            raise ToolError("Protected secret, Git metadata, or session path is unavailable.", "PATH_DENIED")
         # Windows NTFS alternate streams must not bypass the filename checks.
         if any(":" in part for part in lexical.parts):
-            raise ToolError("Alternate data streams are not supported.")
+            raise ToolError("Alternate data streams are not supported.", "PATH_DENIED")
         if directory and not resolved.is_dir():
-            raise ToolError("Directory does not exist.")
+            raise ToolError("Directory does not exist.", "NOT_FOUND")
         return resolved
 
     def _relative(self, path: Path) -> str:
@@ -216,11 +272,11 @@ class ToolRegistry:
 
     def _read(self, path: Path) -> tuple[bytes, str]:
         if not path.is_file():
-            raise ToolError("File does not exist or is not a regular file.")
+            raise ToolError("File does not exist or is not a regular file.", "NOT_FOUND")
         with path.open("rb") as handle:
             data = handle.read(MAX_FILE_BYTES + 1)
         if len(data) > MAX_FILE_BYTES:
-            raise ToolError(f"File exceeds {MAX_FILE_BYTES} bytes; use a bounded shell read.")
+            raise ToolError(f"File exceeds {MAX_FILE_BYTES} bytes; use a bounded shell read.", "UNSUPPORTED_FILE")
         return data, _text(data)
 
     def _safe_entry(self, entry: Path) -> bool:
@@ -233,10 +289,12 @@ class ToolRegistry:
         pending = [base]
         scanned = found = 0
         while pending:
+            self._check_cancelled()
             folder = pending.pop()
             entries = []
             with os.scandir(folder) as iterator:
                 for item in iterator:
+                    self._check_cancelled()
                     scanned += 1
                     if scanned > MAX_SCAN_ENTRIES:
                         yield None
@@ -244,6 +302,7 @@ class ToolRegistry:
                     entries.append(Path(item.path))
             directories = []
             for entry in sorted(entries, key=lambda p: p.name.lower()):
+                self._check_cancelled()
                 if not self._safe_entry(entry):
                     continue
                 try:
@@ -266,6 +325,7 @@ class ToolRegistry:
         scan_truncated = False
         with os.scandir(base) as iterator:
             for index, item in enumerate(iterator):
+                self._check_cancelled()
                 if index >= MAX_SCAN_ENTRIES:
                     scan_truncated = True
                     break
@@ -310,40 +370,61 @@ class ToolRegistry:
                 "truncated": more or scan_truncated, "scan_truncated": scan_truncated}
 
     def _search_text(self, query: str, path: str = ".", case_sensitive: bool = True,
-                     offset: int = 0, limit: int = 100) -> dict:
+                     offset: int = 0, limit: int = 100, include_glob: str = "*",
+                     exclude_glob: str = "", context_lines: int = 0, files_only: bool = False) -> dict:
         if not query or "\n" in query or "\r" in query:
             raise ToolError("query must be nonempty literal text on one line.")
-        base = self._path(path, directory=True)
+        base = self._path(path)
+        if not base.exists():
+            raise ToolError("Search path does not exist.", "NOT_FOUND")
         needle = query if case_sensitive else query.casefold()
         matches = []
         count = chars = skipped = 0
         scan_truncated = more = False
-        for entry in self._walk(base):
+        for entry in self._walk(base) if base.is_dir() else [base]:
+            self._check_cancelled()
             if entry is None:
                 scan_truncated = True
                 break
+            relative = self._relative(entry)
+            if not _glob_matches(relative, include_glob) or (exclude_glob and _glob_matches(relative, exclude_glob)):
+                continue
             try:
                 _, content = self._read(entry)
             except (OSError, ToolError):
                 skipped += 1
                 continue
-            for number, line in enumerate(content.splitlines(), 1):
+            lines = content.splitlines()
+            for number, line in enumerate(lines, 1):
+                self._check_cancelled()
                 if needle not in (line if case_sensitive else line.casefold()):
                     continue
                 count += 1
                 if count <= offset:
+                    if files_only:
+                        break
                     continue
                 excerpt = _bounded_text(self.redact(line), 1000)
-                relative = self._relative(entry)
-                if len(matches) >= limit or chars + len(excerpt) + len(relative) > MAX_OUTPUT_CHARS:
+                item = relative if files_only else {"path": relative, "line": number, "text": excerpt,
+                                                    "line_truncated": len(self.redact(line)) > 1000}
+                item_chars = len(relative) if files_only else len(relative) + len(excerpt)
+                if context_lines and not files_only:
+                    context = [{"line": index + 1, "text": _bounded_text(self.redact(lines[index]), 1000),
+                                "line_truncated": len(self.redact(lines[index])) > 1000}
+                               for index in range(max(0, number - 1 - context_lines), min(len(lines), number + context_lines))
+                               if index != number - 1]
+                    item["context"] = context
+                    item_chars += sum(len(row["text"]) for row in context)
+                if len(matches) >= limit or chars + item_chars > MAX_OUTPUT_CHARS:
                     more = True
                     break
-                matches.append({"path": relative, "line": number, "text": excerpt,
-                                "line_truncated": len(line) > 1000})
-                chars += len(excerpt) + len(relative)
+                matches.append(item)
+                chars += item_chars
+                if files_only:
+                    break
             if more:
                 break
-        return {"ok": True, "matches": matches, "next_offset": offset + len(matches),
+        return {"ok": True, "files" if files_only else "matches": matches, "next_offset": offset + len(matches),
                 "truncated": more or scan_truncated, "scan_truncated": scan_truncated,
                 "skipped_files": skipped}
 
@@ -405,16 +486,16 @@ class ToolRegistry:
     def _create_file(self, path: str, content: str) -> dict:
         target = self._path(path)
         if target.exists():
-            raise ToolError("File already exists; use replace_text or apply_patch.")
+            raise ToolError("File already exists; use replace_text or apply_patch.", "FILE_EXISTS")
         data = content.encode("utf-8")
         if len(data) > MAX_FILE_BYTES:
             raise ToolError("New file exceeds the file size limit.")
         _text(data)
         diff = self._diff(target, "", content)
-        if not self.approve("file", self.redact(f"Create {self._relative(target)}\n{diff}")):
-            return {"ok": False, "error": "User declined file creation.", "declined": True}
+        if not self._approve_file(f"Create {self._relative(target)}\n{diff}"):
+            return tool_failure("APPROVAL_DENIED", "User declined file creation.", declined=True)
         if self._path(path) != target:
-            raise ToolError("Path changed while awaiting approval; retry after reading the workspace.")
+            raise ToolError("Path changed while awaiting approval; retry after reading the workspace.", "EDIT_CONFLICT")
         target.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._stage(target, data, None)
         try:
@@ -437,9 +518,9 @@ class ToolRegistry:
         new_text = new_text.replace("\r\n", "\n").replace("\n", newline)
         first = before.find(old_text)
         if first < 0:
-            raise ToolError("old_text matched 0 times; exactly one match is required.")
+            raise ToolError("old_text matched 0 times; exactly one match is required.", "EDIT_CONFLICT")
         if before.find(old_text, first + 1) >= 0:
-            raise ToolError("old_text matched at least 2 times; exactly one match is required.")
+            raise ToolError("old_text matched at least 2 times; exactly one match is required.", "EDIT_CONFLICT")
         after = before.replace(old_text, new_text, 1)
         return self._commit([(target, original, after.encode("utf-8"))])
 
@@ -452,23 +533,25 @@ class ToolRegistry:
         if not changes:
             return {"ok": True, "changed": False, "files": [], "diff": ""}
         diff = "\n".join(self._diff(path, _text(before), _text(after)) for path, before, after in changes)
-        if not self.approve("file", self.redact(diff)):
-            return {"ok": False, "error": "User declined file changes.", "declined": True}
+        if not self._approve_file(diff):
+            return tool_failure("APPROVAL_DENIED", "User declined file changes.", declined=True)
         staged: list[tuple[Path, Path]] = []
         applied = []
         try:
             # Stage everything before the first write.
-            for target, _, updated in changes:
+            for target, original, updated in changes:
                 if self._path(str(target)) != target:
-                    raise ToolError("Path changed while awaiting approval.")
+                    raise ToolError("Path changed while awaiting approval.", "EDIT_CONFLICT")
+                if self._read(target)[0] != original:
+                    raise ToolError("File changed while awaiting approval; no files were written.", "EDIT_CONFLICT")
                 staged.append((target, self._stage(target, updated, stat.S_IMODE(target.stat().st_mode))))
             for target, temporary in staged:
                 os.replace(temporary, target)
                 applied.append(self._relative(target))
         except OSError as exc:
             # Multi-file filesystem transactions do not exist here; explicitly report partial writes.
-            return {"ok": False, "error": str(exc), "applied_files": applied,
-                    "partial_write": bool(applied), "guidance": "Read affected files before retrying; existing changes were not rolled back."}
+            return tool_failure("PARTIAL_WRITE" if applied else "IO_ERROR", str(exc), applied_files=applied,
+                                partial_write=bool(applied), guidance="Read affected files before retrying; existing changes were not rolled back.")
         finally:
             for _, temporary in staged:
                 temporary.unlink(missing_ok=True)
@@ -477,7 +560,8 @@ class ToolRegistry:
                 "diff": _bounded_text(diff), "diff_truncated": len(diff) > MAX_OUTPUT_CHARS}
 
     def _apply_patch(self, patch: str) -> dict:
-        sections = _parse_patch(patch)
+        context_format = patch.startswith("*** Begin Patch")
+        sections = _parse_context_patch(patch) if context_format else _parse_patch(patch)
         changes = []
         seen: set[Path] = set()
         for name, hunks in sections:
@@ -486,18 +570,26 @@ class ToolRegistry:
                 raise ToolError("A patch must contain only one section per file.")
             seen.add(target)
             original, content = self._read(target)
+            if context_format:
+                hunks = _locate_context_hunks(content, hunks)
             updated = _apply_hunks(content, hunks)
             changes.append((target, original, updated.encode("utf-8")))
         return self._commit(changes)
 
-    def _run_command(self, command: str, cwd: str = ".", timeout: float = 120, background: bool = False) -> dict:
+    def _run_command(self, command: str, cwd: str = ".", timeout: float = 120, background: bool = False,
+                     yield_time_ms: int = 10_000, max_output_bytes: int = 16_384, purpose: str = "task") -> dict:
         if not command.strip():
             raise ToolError("command must not be empty.")
         self._path(cwd, directory=True)
-        return self.process_manager.run(command=command, cwd=cwd, timeout=timeout, background=background)
+        return self.process_manager.run(command=command, cwd=cwd, timeout=timeout, background=background,
+                                        yield_time_ms=yield_time_ms, max_output_bytes=max_output_bytes, purpose=purpose)
 
-    def _poll_command(self, job_id: str, offset: int = 0) -> dict:
-        return self.process_manager.poll(job_id, offset=offset)
+    def completion_blockers(self) -> list[dict]:
+        return self.process_manager.completion_blockers()
+
+    def _poll_command(self, job_id: str, offset: int = 0, wait_ms: int = 1000,
+                      max_output_bytes: int = 16_384) -> dict:
+        return self.process_manager.poll(job_id, offset=offset, wait_ms=wait_ms, max_output_bytes=max_output_bytes)
 
     def _cancel_command(self, job_id: str) -> dict:
         return self.process_manager.cancel(job_id)
@@ -515,6 +607,70 @@ def _patch_path(header: str, prefix: str) -> str:
     if not value or value.startswith('"'):
         raise ToolError("Use unquoted workspace-relative patch paths.")
     return value
+
+
+def _parse_context_patch(patch: str) -> list:
+    lines = patch.splitlines()
+    if not lines or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
+        raise ToolError("Context patch requires Begin Patch and End Patch markers.")
+    sections = []
+    index = 1
+    while index < len(lines) - 1:
+        header = lines[index]
+        if not header.startswith("*** Update File: "):
+            raise ToolError("Expected *** Update File: path; only existing files are supported.")
+        path = header[len("*** Update File: "):]
+        index += 1
+        hunks = []
+        while index < len(lines) - 1 and lines[index] == "@@":
+            index += 1
+            body = []
+            while index < len(lines) - 1 and lines[index] != "@@" and not lines[index].startswith("*** "):
+                line = lines[index]
+                if line == "\\ No newline at end of file":
+                    if not body or not body[-1][2]:
+                        raise ToolError("Misplaced no-newline marker.")
+                    operation, text, _ = body[-1]
+                    body[-1] = operation, text, False
+                elif line and line[0] in " +-":
+                    body.append((line[0], line[1:], True))
+                else:
+                    raise ToolError("Context hunk lines require a space, minus or plus prefix.")
+                index += 1
+            if not any(operation in " -" for operation, _, _ in body):
+                raise ToolError("Each context hunk needs existing lines to locate it uniquely.")
+            hunks.append(body)
+        if not hunks:
+            raise ToolError("Context file section requires @@ and at least one hunk.")
+        sections.append((path, hunks))
+    if not sections:
+        raise ToolError("Patch is empty.")
+    return sections
+
+
+def _locate_context_hunks(content: str, bodies: list) -> list:
+    source = [(line.rstrip("\r\n"), line.endswith(("\n", "\r"))) for line in content.splitlines(keepends=True)]
+    hunks = []
+    cursor = delta = 0
+    for body in bodies:
+        old = [(text, terminated) for operation, text, terminated in body if operation in " -"]
+        positions = []
+        for index in range(len(source) - len(old) + 1):
+            if source[index:index + len(old)] == old:
+                positions.append(index)
+                if len(positions) > 1:
+                    break
+        if len(positions) != 1:
+            raise ToolError("Context matched zero or multiple locations; read the file and supply more context.", "PATCH_CONTEXT_MISMATCH")
+        position = positions[0]
+        if position < cursor:
+            raise ToolError("Context hunks overlap or are out of file order.")
+        new_count = sum(operation in " +" for operation, _, _ in body)
+        new_start = position + delta + (1 if new_count else 0)
+        hunks.append((position + 1, len(old), new_start, new_count, body))
+        delta += new_count - len(old)
+        cursor = position + len(old)
+    return hunks
 
 
 def _parse_patch(patch: str) -> list:
@@ -591,11 +747,11 @@ def _apply_hunks(content: str, hunks: list) -> str:
         for operation, text, terminated in body:
             if operation in " -":
                 if cursor >= len(source):
-                    raise ToolError("Patch refers past the end of the file.")
+                    raise ToolError("Patch refers past the end of the file.", "PATCH_CONTEXT_MISMATCH")
                 current = source[cursor]
                 actual_terminated = current.endswith(("\n", "\r"))
                 if current.rstrip("\r\n") != text or actual_terminated != terminated:
-                    raise ToolError(f"Patch context does not match at line {cursor + 1}; read the file again.")
+                    raise ToolError(f"Patch context does not match at line {cursor + 1}; read the file again.", "PATCH_CONTEXT_MISMATCH")
                 cursor += 1
                 if operation == " ":
                     output.append(current)

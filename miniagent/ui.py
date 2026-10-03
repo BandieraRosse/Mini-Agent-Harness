@@ -45,6 +45,7 @@ class TextRecord:
 class Terminal:
     def __init__(self, redact, *, approval='ask', plain=False):
         self.redact, self.approval = redact, approval
+        self.approval_rules = set()
         self.tty = sys.stdin.isatty()
         self.color = sys.stdout.isatty() and not os.environ.get('NO_COLOR') and not plain
         self.editor = None
@@ -195,12 +196,19 @@ class Terminal:
 
     def approve(self, operation, details):
         self.check_cancelled()
+        original = details
         details = self._safe(details)
+        # Never remember a sanitized/redacted command: distinct commands might
+        # otherwise collapse to the same display text.
+        rememberable = operation == 'shell' and original == details and '[REDACTED]' not in details
+        rule = (operation, details)
         with self._lock:
             if self.current_tool is not None:
                 self.current_tool.review = details
                 self._changed()
-        if self.approval == 'trust':
+        if self.approval == 'read-only':
+            return False
+        if self.approval == 'trust' or rememberable and rule in self.approval_rules:
             if self._app is None and (self.detailed or self.current_tool is None):
                 self._write([('class:tool.muted', details + '\n')])
             return True
@@ -209,8 +217,13 @@ class Terminal:
             return False
         if self._app is None:
             self.print(details, '33')
-            return input('允许执行？[y/N] ').strip().lower() in {'y', 'yes'}
-        request = {'details': details, 'event': threading.Event(), 'allowed': False}
+            answer = input('允许执行？[y/N' + ('/a 本会话记住此命令' if rememberable else '') + '] ').strip().lower()
+            if answer == 'a' and rememberable:
+                self.approval_rules.add(rule)
+                return True
+            return answer in {'y', 'yes'}
+        request = {'details': details, 'event': threading.Event(), 'allowed': False,
+                   'rule': rule if rememberable else None}
         with self._lock:
             self.check_cancelled()
             self._approval = request
@@ -237,6 +250,8 @@ class Terminal:
                     style = 'diff.add' if line.startswith('+') else 'diff.remove' if line.startswith('-') else 'tool.command'
                     result.append((f'class:{style}', line))
                 result.append(('class:tool.running', '\n允许执行？ Y 批准 / N 拒绝\n'))
+                if self._approval.get('rule') is not None:
+                    result.append(('class:tool.running', 'A 本会话记住此完整命令及工作目录\n'))
             result = [(style, self._safe(text)) for style, text in result]
             if start == 0:
                 self._fragments_cache = result
@@ -343,11 +358,18 @@ class Terminal:
         @bindings.add('n')
         @bindings.add('Y')
         @bindings.add('N')
+        @bindings.add('a')
+        @bindings.add('A')
         def answer(event):
             with self._lock:
                 pending = self._approval
                 if pending is not None:
-                    pending['allowed'] = event.data.lower() == 'y' and not self._stopping
+                    answer = event.data.lower()
+                    if answer == 'a' and pending.get('rule') is None:
+                        return
+                    pending['allowed'] = answer in ('y', 'a') and not self._stopping
+                    if pending['allowed'] and answer == 'a':
+                        self.approval_rules.add(pending['rule'])
                     self._approval = None
                     self._changed()
                     pending['event'].set()
@@ -469,7 +491,9 @@ class Terminal:
             if role == 'user':
                 self.events.append(TextRecord('\n› ' + self._safe(message['content']) + '\n', 'user'))
             elif role == 'assistant':
-                if message.get('content'):
+                if message.get('completion_deferred'):
+                    self.events.append(TextRecord('必需任务结果未齐，曾暂缓最终答复。\n', 'notice'))
+                elif message.get('content'):
                     self.events.append(TextRecord(self._safe(message['content']) + '\n'))
                 for call in message.get('tool_calls', []):
                     function = call['function']

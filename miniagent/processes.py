@@ -21,6 +21,8 @@ import time
 from typing import Callable
 import uuid
 
+from .tool_errors import tool_failure
+
 
 MAX_CAPTURE_BYTES = 1024 * 1024
 PAGE_BYTES = 16 * 1024
@@ -158,6 +160,10 @@ class _Job:
         self.started = time.monotonic()
         self.ended: float | None = None
         self.output = bytearray()
+        self.tail = bytearray()
+        self.total_bytes = 0
+        self.purpose = "task"
+        self.observed_complete = False
         self.dropped_bytes = 0
         self.reason: str | None = None
         self.capture_error: str | None = None
@@ -172,7 +178,7 @@ class ProcessManager:
     """Run approved shell commands; job IDs are valid only in this instance.
 
     Output offsets count UTF-8 bytes after secret redaction. At most 1 MiB is
-    retained per job, and each response contains at most 16 KiB. Older completed
+    retained per job (head plus rolling tail). Pages default to 16 KiB. Older completed
     jobs are evicted when the 32-job limit is reached. No output log is written.
     """
 
@@ -191,8 +197,28 @@ class ProcessManager:
             value = value.replace(secret, "[REDACTED]")
         return self.redact(value)
 
-    def _error(self, message: str, **extra: object) -> dict:
-        return {"ok": False, "error": self._safe(message), **extra}
+    def _error(self, message: str, code: str = "INVALID_ARGUMENT", **extra: object) -> dict:
+        return tool_failure(code, self._safe(message), **extra)
+
+    @staticmethod
+    def _output_options(wait_ms: int, max_output_bytes: int) -> bool:
+        return (type(wait_ms) is int and 0 <= wait_ms <= 60_000
+                and type(max_output_bytes) is int and 256 <= max_output_bytes <= 65_536)
+
+    def _wait(self, job: _Job, wait_ms: int, offset: int | None = None) -> None:
+        deadline = time.monotonic() + wait_ms / 1000
+        while True:
+            event = getattr(self, "cancel_event", None)
+            if event is not None and event.is_set():
+                self._cancel(job)
+                raise KeyboardInterrupt()
+            with job.lock:
+                if job.done.is_set() or (offset is not None and job.total_bytes > offset):
+                    return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            job.done.wait(min(0.05, remaining))
 
     def _environment(self) -> dict[str, str]:
         environment = {key: value for key, value in os.environ.items()
@@ -236,12 +262,17 @@ class ProcessManager:
         return False
 
     def run(self, command: str, cwd: str = ".", timeout: float = 120,
-            background: bool = False) -> dict:
+            background: bool = False, yield_time_ms: int = 10_000,
+            max_output_bytes: int = PAGE_BYTES, purpose: str = "task") -> dict:
         cancel_event = getattr(self, "cancel_event", None)
         if cancel_event is not None and cancel_event.is_set():
             raise KeyboardInterrupt()
         if self._closed:
-            return self._error("This process manager has been closed.")
+            return self._error("This process manager has been closed.", "EXECUTION_FAILED")
+        if purpose not in ("task", "service"):
+            return self._error("purpose must be task or service.")
+        if not self._output_options(yield_time_ms, max_output_bytes):
+            return self._error("yield_time_ms must be 0..60000 and max_output_bytes must be 256..65536 integers.")
         if not isinstance(command, str) or not command.strip():
             return self._error("command must be a nonempty string.")
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 86400:
@@ -254,23 +285,24 @@ class ProcessManager:
             directory = (self.workspace / (cwd or ".")).resolve()
             directory.relative_to(self.workspace)
             if not directory.is_dir():
-                return self._error("cwd must be an existing directory.")
+                return self._error("cwd must be an existing directory.", "NOT_FOUND")
         except (ValueError, OSError, RuntimeError) as exc:
-            return self._error(f"cwd must resolve inside the workspace: {exc}")
+            return self._error(f"cwd must resolve inside the workspace: {exc}", "PATH_DENIED")
         if self._destructive_git(command):
-            return self._error("Refused a destructive Git operation. Run it yourself if intended; MiniAgent preserves existing work.")
+            return self._error("Refused a destructive Git operation. Run it yourself if intended; MiniAgent preserves existing work.", "COMMAND_DENIED")
         try:
             approved = self.approve("shell", self._safe(f"cwd: {directory}\ncommand: {command}"))
         except Exception as exc:
-            return self._error(f"Command approval failed: {exc}")
+            return self._error(f"Command approval failed: {exc}", "APPROVAL_FAILED")
         if not approved:
-            return self._error("Shell command was not approved.", denied=True)
+            return self._error("Shell command was not approved.", "APPROVAL_DENIED", denied=True)
         if cancel_event is not None and cancel_event.is_set():
             raise KeyboardInterrupt()
         if len(self._jobs) >= MAX_JOBS:
-            oldest = next((key for key, job in self._jobs.items() if job.done.is_set()), None)
+            oldest = next((key for key, job in self._jobs.items()
+                           if job.done.is_set() and (job.observed_complete or job.purpose == "service")), None)
             if oldest is None:
-                return self._error(f"All {MAX_JOBS} job slots are active; cancel or wait for a job first.")
+                return self._error(f"All {MAX_JOBS} job slots are active; cancel or wait for a job first.", "JOB_LIMIT")
             del self._jobs[oldest]
 
         process = None
@@ -289,18 +321,16 @@ class ProcessManager:
                 windows_job.attach_and_resume(process)
             job_id = uuid.uuid4().hex[:12]
             job = _Job(job_id, process, directory, float(timeout), windows_job)
+            job.purpose = purpose
             self._jobs[job_id] = job
             job.reader = threading.Thread(target=self._capture, args=(job,), daemon=True)
             job.monitor = threading.Thread(target=self._watch, args=(job,), daemon=True)
             job.reader.start()
             job.monitor.start()
-            if not background:
-                while not job.done.wait(0.1):
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise KeyboardInterrupt()
+            self._wait(job, 0 if background else yield_time_ms)
             if cancel_event is not None and cancel_event.is_set():
                 raise KeyboardInterrupt()
-            return self._result(job, 0)
+            return self._observe(job, 0, max_output_bytes)
         except BaseException as exc:
             if job is not None:
                 self._cancel(job)
@@ -321,17 +351,28 @@ class ProcessManager:
                 windows_job.stop()
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            return self._error(f"Could not execute command: {exc}")
+            return self._error(f"Could not execute command: {exc}", "EXECUTION_FAILED")
 
     def _append(self, job: _Job, text: str) -> None:
         data = self._safe(text).encode("utf-8")
         with job.lock:
-            remaining = 0 if job.dropped_bytes else MAX_CAPTURE_BYTES - len(job.output)
-            kept = data[:remaining]
-            # Do not retain a partial UTF-8 code point at the capture boundary.
-            kept = kept.decode("utf-8", errors="ignore").encode("utf-8")
-            job.output.extend(kept)
-            job.dropped_bytes += len(data) - len(kept)
+            job.total_bytes += len(data)
+            if not job.tail and not job.dropped_bytes and len(job.output) + len(data) <= MAX_CAPTURE_BYTES:
+                job.output.extend(data)
+                return
+            if not job.tail and not job.dropped_bytes:
+                job.output.extend(data)
+                data = b""
+                head_end = len(job.output[:MAX_CAPTURE_BYTES // 2].decode("utf-8", errors="ignore").encode("utf-8"))
+                job.tail.extend(job.output[head_end:])
+                del job.output[head_end:]
+            job.tail.extend(data)
+            capacity = MAX_CAPTURE_BYTES - len(job.output)
+            trim = max(0, len(job.tail) - capacity)
+            while trim < len(job.tail) and job.tail[trim] & 0xC0 == 0x80:
+                trim += 1
+            del job.tail[:trim]
+            job.dropped_bytes = job.total_bytes - len(job.output) - len(job.tail)
 
     def _capture(self, job: _Job) -> None:
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -395,42 +436,80 @@ class ProcessManager:
                 job.ended = time.monotonic()
             job.done.set()
 
-    def _result(self, job: _Job, offset: int) -> dict:
+    def _result(self, job: _Job, offset: int, max_output_bytes: int = PAGE_BYTES) -> dict:
         with job.lock:
-            size = len(job.output)
+            size = job.total_bytes
             if offset > size:
-                return self._error("offset exceeds the captured output; use next_offset from a previous result.", job_id=job.job_id)
-            if offset < size and job.output[offset] & 0xC0 == 0x80:
-                return self._error("offset splits a UTF-8 character; use next_offset from a previous result.", job_id=job.job_id)
-            end = min(offset + PAGE_BYTES, size)
-            data = bytes(job.output[offset:end])
-            if end < size:
-                # The next page starts on a complete UTF-8 character.
-                text = data.decode("utf-8", errors="ignore")
-                end = offset + len(text.encode("utf-8"))
-            else:
-                text = data.decode("utf-8", errors="replace")
+                return self._error("offset exceeds the output; use next_offset from a previous result.", "INVALID_OFFSET", job_id=job.job_id)
+            head_end, tail_start = len(job.output), size - len(job.tail)
+            requested_offset = offset
+            if head_end <= offset < tail_start:
+                offset = tail_start
+            segment, start = (job.output, 0) if offset < head_end else (job.tail, tail_start)
+            local = offset - start
+            if local < len(segment) and segment[local] & 0xC0 == 0x80:
+                return self._error("offset splits a UTF-8 character; use next_offset from a previous result.", "INVALID_OFFSET", job_id=job.job_id)
+            # Include an independently labelled latest tail preview on head pages.
+            tail_preview = bool(job.dropped_bytes and offset < head_end)
+            page_budget = max_output_bytes // 2 if tail_preview else max_output_bytes
+            text = bytes(segment[local:local + page_budget]).decode("utf-8", errors="ignore")
+            end = offset + len(text.encode("utf-8"))
             complete = job.done.is_set()
             status = (job.reason or "completed") if complete else "running"
             code = job.process.returncode if complete else None
             result = {"ok": job.capture_error is None and status not in {"timed_out", "cancelled"} and (code in (None, 0)),
-                      "job_id": job.job_id, "status": status, "complete": complete,
+                      "job_id": job.job_id, "status": status, "complete": complete, "purpose": job.purpose,
                       "output": self._safe(text), "exit_code": code,
                       "elapsed": round((job.ended or time.monotonic()) - job.started, 3),
                       "cwd": self._safe(str(job.cwd)), "offset": offset, "next_offset": end,
                       "has_more": end < size, "truncated": end < size or job.dropped_bytes > 0,
-                      "captured_bytes": size, "dropped_bytes": job.dropped_bytes,
+                      "captured_bytes": head_end + len(job.tail), "total_bytes": size,
+                      "head_end_offset": head_end, "tail_start_offset": tail_start,
+                      "dropped_bytes": job.dropped_bytes,
                       "output_limit_reached": job.dropped_bytes > 0}
+            if job.dropped_bytes:
+                result["omitted_range"] = {"start": head_end, "end": tail_start}
+            if offset != requested_offset:
+                result["skipped_range"] = {"start": requested_offset, "end": offset}
+            if tail_preview:
+                preview = bytes(job.tail[-(max_output_bytes - len(text.encode('utf-8'))):]).decode("utf-8", errors="ignore")
+                result.update(output_tail=preview, output_tail_offset=size - len(preview.encode("utf-8")),
+                              output_tail_end_offset=size)
             if job.capture_error:
-                result["error"] = job.capture_error
+                result.update(self._error(job.capture_error, "OUTPUT_CAPTURE_FAILED"))
+            elif status in {"timed_out", "cancelled"}:
+                error_code = "COMMAND_TIMEOUT" if status == "timed_out" else "COMMAND_CANCELLED"
+                result.update(self._error(f"Command {status}.", error_code))
+            elif complete and code != 0:
+                result.update(self._error(f"Command exited with code {code}.", "COMMAND_FAILED"))
             return result
 
-    def poll(self, job_id: str, offset: int = 0) -> dict:
+    def poll(self, job_id: str, offset: int = 0, wait_ms: int = 1000,
+             max_output_bytes: int = PAGE_BYTES) -> dict:
         if not isinstance(job_id, str) or job_id not in self._jobs:
-            return self._error("Unknown job ID in this run. Its previous outcome is uncertain; the command has not been replayed.", uncertain=True)
+            return self._error("Unknown job ID in this run. Its previous outcome is uncertain; the command has not been replayed.", "UNKNOWN_JOB", uncertain=True)
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            return self._error("offset must be a nonnegative byte offset.")
-        return self._result(self._jobs[job_id], offset)
+            return self._error("offset must be a nonnegative byte offset.", "INVALID_OFFSET")
+        if not self._output_options(wait_ms, max_output_bytes):
+            return self._error("wait_ms must be 0..60000 and max_output_bytes must be 256..65536 integers.")
+        job = self._jobs[job_id]
+        initial = self._result(job, offset, max_output_bytes)
+        if initial.get("error_code") == "INVALID_OFFSET":
+            return initial
+        self._wait(job, wait_ms, offset)
+        return self._observe(job, offset, max_output_bytes)
+
+    def _observe(self, job: _Job, offset: int, max_output_bytes: int = PAGE_BYTES) -> dict:
+        result = self._result(job, offset, max_output_bytes)
+        if result.get("complete"):
+            job.observed_complete = True
+        return result
+
+    def completion_blockers(self) -> list[dict]:
+        """Terminal state must have been returned by a tool, not merely reached."""
+        return [{"job_id": job.job_id, "status": "running" if not job.done.is_set() else "unobserved",
+                 "next_action": "Call poll_command to observe completion and the exit code."}
+                for job in self._jobs.values() if job.purpose == "task" and not job.observed_complete]
 
     def _cancel(self, job: _Job) -> None:
         if job.done.is_set():
@@ -453,10 +532,10 @@ class ProcessManager:
 
     def cancel(self, job_id: str) -> dict:
         if not isinstance(job_id, str) or job_id not in self._jobs:
-            return self._error("Unknown job ID in this run. No process was cancelled; its previous outcome is uncertain.", uncertain=True)
+            return self._error("Unknown job ID in this run. No process was cancelled; its previous outcome is uncertain.", "UNKNOWN_JOB", uncertain=True)
         job = self._jobs[job_id]
         self._cancel(job)
-        return self._result(job, 0)
+        return self._observe(job, 0)
 
     def close(self) -> None:
         self._closed = True

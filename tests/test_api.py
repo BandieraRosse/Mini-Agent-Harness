@@ -52,6 +52,8 @@ def http_server(responses):
                 if spec.get("prefix"):
                     self.wfile.write(spec["prefix"])
                     self.wfile.flush()
+                if spec.get("wait") is not None:
+                    spec["wait"].wait(5)
                 time.sleep(spec.get("delay", 0))
                 self.wfile.write(spec.get("body", b""))
                 self.wfile.flush()
@@ -73,6 +75,22 @@ def http_server(responses):
 
 
 class APITests(unittest.TestCase):
+    def test_phase_markers_and_native_metadata_survive_stream_and_history(self):
+        wire = sse(chunk({"content": "[comm"}), chunk({"content": "entary]\nworking"}), chunk(finish="stop"))
+        with http_server([{"body": wire}]) as (url, requests):
+            client = self.client(url)
+            message = client.complete([])["choices"][0]["message"]
+            self.assertEqual(message["phase"], "commentary")
+            self.assertEqual(message["content"], "working")
+            payload = client._payload([message], None, False)
+            self.assertNotIn("phase", payload["messages"][0])
+            self.assertEqual(payload["messages"][0]["content"], "[commentary]\nworking")
+        terminal = chunk(finish="stop")
+        terminal["end_turn"] = False
+        with http_server([{"body": sse(chunk({"content": "progress", "phase": "commentary"}), terminal)}]) as (url, _):
+            response = self.client(url).complete([])
+            self.assertEqual(response["choices"][0]["message"]["phase"], "commentary")
+
     def client(self, url, **kwargs):
         return ChatClient(Config(base_url=url, **kwargs), "test-secret-key")
 
@@ -174,10 +192,22 @@ class APITests(unittest.TestCase):
 
     def test_timeout_after_partial_text_does_not_retry(self):
         prefix = sse(chunk({"content": "partial"}), done=False)
-        with http_server([{"prefix": prefix, "delay": 0.15, "body": answer()}]) as (url, requests):
+        release = threading.Event()
+        with http_server([{"prefix": prefix, "wait": release, "body": answer()}]) as (url, requests):
             parts = []
-            with self.assertRaisesRegex(APIError, "timed out"):
-                self.client(url, timeout=0.03).complete([], on_text=parts.append)
+            client = self.client(url, timeout=5)
+
+            def on_text(text):
+                parts.append(text)
+                # Test the stream read deadline only after actual generation;
+                # connection/startup scheduling must not trigger the timeout.
+                client._active_socket.settimeout(0.03)
+
+            try:
+                with self.assertRaisesRegex(APIError, "timed out"):
+                    client.complete([], on_text=on_text)
+            finally:
+                release.set()
         self.assertEqual(parts, ["partial"])
         self.assertEqual(len(requests), 1)
 

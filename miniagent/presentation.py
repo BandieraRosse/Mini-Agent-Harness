@@ -69,6 +69,8 @@ def _heading(record):
             "find_files": ("files", "Find", "files"),
             "list_directory": ("entries", "List", "entries"),
         }[name]
+        if name == "search_text" and args.get("files_only"):
+            field, noun = "files", "files"
         query = args.get("query", args.get("pattern", "*"))
         title = f"{label} {_short(path)}" if name == "list_directory" else f"{label} {_short(query)} in {_short(path)}"
         if record.result is not None and result.get("ok"):
@@ -92,7 +94,7 @@ def _heading(record):
 
 def _limitations(result):
     if result.get("output_limit_reached"):
-        yield "输出达到捕获上限；部分输出未保留。"
+        yield "输出达到捕获上限；已保留开头和最新尾部，中间部分未保留。"
     elif result.get("has_more"):
         yield "工具输出已分页；仍有后续输出，可继续 poll_command。"
     elif result.get("truncated"):
@@ -155,8 +157,10 @@ def tool_fragments(record: ToolRecord, detailed=False) -> list[tuple[str, str]]:
             fragments.append(("class:tool.muted", f"  cwd: {_short(cwd)}\n"))
         if result.get("error"):
             fragments.extend(_block("错误", result["error"], style="class:tool.error"))
-        if result.get("output"):
-            lines = str(result["output"]).splitlines()
+        if result.get("output") or result.get("output_tail"):
+            if result.get("output_tail"):
+                fragments.append(("class:tool.muted", "  最新输出尾部（与前部分页不连续）\n"))
+            lines = str(result.get("output_tail") or result["output"]).splitlines()
             visible = lines[-(4 if failed else 3):]
             omitted = len(lines) - len(visible)
             if omitted:
@@ -168,6 +172,8 @@ def tool_fragments(record: ToolRecord, detailed=False) -> list[tuple[str, str]]:
                 fragments.append(("class:tool.muted", "  … 长行已折叠（Ctrl+T 查看）\n"))
         if result.get("guidance"):
             fragments.extend(_block("提示", result["guidance"]))
+        elif result.get("next_action"):
+            fragments.extend(_block("提示", result["next_action"]))
     for notice in _limitations(result):
         fragments.append(("class:tool.muted", "  " + notice + "\n"))
     return fragments

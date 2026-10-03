@@ -72,10 +72,53 @@ class SessionTests(unittest.TestCase):
         self.session.append({"role": "user", "content": "safe checkpoint"})
         old = self.session.path.read_bytes()
         with patch("miniagent.sessions.os.replace", side_effect=OSError("disk unavailable")):
+            self.session.append({"role": "user", "content": "new journaled message"})
             with self.assertRaises(OSError):
-                self.session.append({"role": "user", "content": "new unsaved message"})
+                self.session.save()
         self.assertEqual(self.session.path.read_bytes(), old)
         self.assertEqual(list(self.session.directory.glob(".checkpoint-*")), [])
+        restored = Session(self.workspace, 'deepseek', 'fake-model', save=False).load(self.session.data['id'])
+        self.assertEqual(restored.messages[-1]['content'], 'new journaled message')
+
+    def test_journal_avoids_full_rewrite_recovers_partial_tail_and_redacts(self):
+        self.session.append({'role': 'user', 'content': 'initial'})
+        checkpoint = self.session.path.read_bytes()
+        self.session.append({'role': 'assistant', 'content': 'test-secret-key', 'phase': 'commentary'})
+        self.assertEqual(self.session.path.read_bytes(), checkpoint)
+        journal = self.session.path.with_suffix('.jsonl')
+        self.assertNotIn(b'test-secret-key', journal.read_bytes())
+        with journal.open('ab') as stream:
+            stream.write(b'{"seq":2,"message":"\xe4\xb8')
+        restored = Session(self.workspace, 'deepseek', 'fake-model').load(self.session.data['id'])
+        self.assertEqual(len(restored.messages), 2)
+        self.assertEqual(restored.messages[-1]['content'], '[REDACTED]')
+        self.assertFalse(journal.exists())
+
+    def test_journal_checkpoint_leftovers_do_not_duplicate_messages(self):
+        self.session.append({'role': 'user', 'content': 'initial'})
+        self.session.append({'role': 'assistant', 'content': 'answer'})
+        journal = self.session.path.with_suffix('.jsonl')
+        old_records = journal.read_bytes()
+        self.session.save()
+        journal.write_bytes(old_records)
+        restored = Session(self.workspace, 'deepseek', 'fake-model').load(self.session.data['id'])
+        self.assertEqual(len(restored.messages), 2)
+
+    def test_complete_corrupt_journal_record_is_not_silently_ignored(self):
+        self.session.append({'role': 'user', 'content': 'initial'})
+        journal = self.session.path.with_suffix('.jsonl')
+        for content in (b'bad json\n', b'{"seq":3,"state":{},"message":{}}\n'):
+            journal.write_bytes(content)
+            with self.assertRaises(ValueError):
+                Session(self.workspace, 'deepseek', 'fake-model').load(self.session.data['id'])
+
+    def test_periodic_snapshot_contains_all_journal_messages(self):
+        for number in range(34):
+            self.session.append({'role': 'user', 'content': str(number)})
+        checkpoint = json.loads(self.session.path.read_text(encoding='utf-8'))
+        self.assertEqual(len(checkpoint['messages']), 33)
+        restored = Session(self.workspace, 'deepseek', 'fake-model', save=False).load(self.session.data['id'])
+        self.assertEqual(restored.messages, self.session.messages)
 
     def test_malformed_pairings_rejected(self):
         messages = [[{"role": "tool", "tool_call_id": "a", "content": "{}"}],

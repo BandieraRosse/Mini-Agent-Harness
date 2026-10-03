@@ -96,6 +96,18 @@ class PresentationTests(unittest.TestCase):
         record.result["output_limit_reached"] = True
         self.assertIn("未保留", rendered(record, True))
 
+    def test_tail_conclusion_and_file_search_count_are_visible(self):
+        record = ToolRecord("run_command", {"command": "tests"}, {
+            "ok": False, "output": "early log", "output_tail": "FINAL FAILURE",
+            "output_limit_reached": True, "next_action": "Inspect failed tests"})
+        self.assertIn("FINAL FAILURE", rendered(record))
+        self.assertIn("不连续", rendered(record))
+        self.assertIn("early log", rendered(record, True))
+        self.assertIn("Inspect failed tests", rendered(record))
+        search = ToolRecord("search_text", {"query": "needle", "files_only": True}, {
+            "ok": True, "files": ["a.py", "b.py"]})
+        self.assertIn("2 files returned", rendered(search))
+
     def test_incomplete_scan_and_partial_write_are_visible(self):
         record = ToolRecord("apply_patch", {}, {"ok": False, "partial_write": True,
             "applied_files": ["x.py"], "guidance": "Read before retrying", "diff_truncated": True})

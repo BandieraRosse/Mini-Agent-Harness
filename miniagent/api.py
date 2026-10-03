@@ -14,6 +14,7 @@ from typing import Any
 
 from . import __version__
 from .config import Config, _clean_key
+from .messages import classify
 
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -119,6 +120,10 @@ def _validate_completion(result: Any) -> dict:
                 or not isinstance(function.get("arguments"), str)):
             raise APIError("API returned incomplete or duplicate tool call metadata")
         ids.add(call_id)
+    try:
+        choice["message"] = classify(message, choice.get("end_turn"))
+    except ValueError as exc:
+        raise APIError(str(exc)) from None
     return result
 
 
@@ -217,6 +222,12 @@ class ChatClient:
         clean_messages = []
         for message in messages:
             clean = dict(message)
+            phase = clean.pop("phase", None)
+            if clean.pop('completion_deferred', False):
+                phase = 'commentary'
+                clean['content'] = 'Unaccepted draft; required job results were still pending:\n' + (clean.get('content') or '')
+            if phase and isinstance(clean.get("content"), str):
+                clean["content"] = f"[{phase}]\n" + clean["content"]
             if self.config.provider == "openai":
                 clean.pop("reasoning_content", None)
             clean_messages.append(clean)
@@ -327,6 +338,7 @@ class ChatClient:
         refusal: list[str] = []
         calls: dict[int, dict] = {}
         finish = None
+        phase = end_turn = None
         usage: dict = {}
         for event in _events(response):
             self.check_cancelled()
@@ -355,6 +367,14 @@ class ChatClient:
                     raise APIError("API stream continued after its finish reason")
                 if delta.get("role") not in (None, "assistant"):
                     raise APIError("API stream contains an unexpected role")
+                if delta.get("phase") is not None:
+                    if phase is not None and phase != delta["phase"]:
+                        raise APIError("API stream changed assistant phase")
+                    phase = delta["phase"]
+                if choice.get("end_turn") is not None:
+                    if end_turn is not None and end_turn != choice["end_turn"]:
+                        raise APIError("API stream changed end_turn signal")
+                    end_turn = choice["end_turn"]
                 for name, target in (("content", content), ("reasoning_content", reasoning), ("refusal", refusal)):
                     part = delta.get(name)
                     if part is not None and not isinstance(part, str):
@@ -391,6 +411,8 @@ class ChatClient:
                     finish = choice["finish_reason"]
         self.check_cancelled()
         message: dict = {"role": "assistant", "content": "".join(content) or None}
+        if phase is not None:
+            message["phase"] = phase
         if reasoning:
             message["reasoning_content"] = "".join(reasoning)
         if refusal:
@@ -399,4 +421,5 @@ class ChatClient:
             if sorted(calls) != list(range(len(calls))):
                 raise APIError("API stream omitted a tool call index")
             message["tool_calls"] = [calls[index] for index in sorted(calls)]
-        return _validate_completion({"choices": [{"index": 0, "message": message, "finish_reason": finish}], "usage": usage})
+        return _validate_completion({"choices": [{"index": 0, "message": message, "finish_reason": finish,
+                                                 "end_turn": end_turn}], "usage": usage})
