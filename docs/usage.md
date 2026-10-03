@@ -1,5 +1,7 @@
 # 使用指南
 
+[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+
 ## 启动与模型
 
 只有系统 Python 的远程服务器，可以从自建分发服务下载安装；无需 pip 或 Git，见 [分发与安装](distribution.md)。

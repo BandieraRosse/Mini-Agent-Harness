@@ -1,5 +1,7 @@
 # 工具参考
 
+[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+
 工具定义来自 `miniagent/tools.py` 的 `SCHEMAS`，使用 Chat Completions function calling 格式。所有调用通过 `ToolRegistry.execute(name, arguments)` 返回 JSON 对象；`ok: false` 表示失败，细节来自 `error` 或命令的 `output`、`exit_code`。参数拼写、类型、范围错误也返回工具结果，Agent 可以据此修正调用。
 
 ## 文件读取与查找

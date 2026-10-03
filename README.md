@@ -60,6 +60,9 @@ miniagent -C /path/to/project
 
 ## 文档与开发
 
+- [Agent 开发入口](AGENTS.md)：项目约定、任务导航和按需阅读入口。
+- [文档索引](docs/README.md)：文档分工与学习路径。
+- [开发指南](docs/development.md)：本地开发、验证和文档维护规则。
 - [使用指南](docs/usage.md)：安装、密钥、模型、输入、恢复和排错。
 - [终端交互](docs/terminal.md)：摘要/详情、快捷键、中文编辑及 Codex 源码参考。
 - [分发与安装](docs/distribution.md)：标准库分发服务、Linux 一行安装、更新和离线使用。

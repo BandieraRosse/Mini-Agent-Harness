@@ -1,5 +1,7 @@
 # 架构与开发
 
+[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+
 MiniAgent 的核心仍然是可读的小型同步循环：上下文 → 模型请求 → 工具调用 → 真实结果 → 下次请求。核心不依赖 SDK、数据库或服务进程。Python 3.10+；终端使用一个直接依赖 `prompt-toolkit`，普通输出仍可使用 `--plain`。
 
 仓库根目录放项目说明、安装配置、`tests/` 和 `docs/`；`miniagent/` 是同一个项目的 Python 源码包，支持 `python -m miniagent` 以及安装后的 `miniagent` 命令。实际被操作的项目由 `-C` 指定，它的 `AGENTS.md` 和 `.miniagent/sessions/` 都属于该目标目录，与程序安装位置无关。

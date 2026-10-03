@@ -1,5 +1,7 @@
 # 终端交互
 
+[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+
 安装后运行 `miniagent`，或在项目目录运行 `python agent.py`。增强终端使用 `prompt-toolkit`，它已列为默认依赖：
 
 ```powershell

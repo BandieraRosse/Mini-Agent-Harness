@@ -1,5 +1,7 @@
 # 分发与服务器安装
 
+[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+
 分发端和使用端均只要求 **Python 3.10+ 标准安装**。使用端无需 Git、pip、虚拟环境或编译器。发布包附带纯 Python 的 `prompt-toolkit`、`wcwidth` 及其许可证，保留完整终端交互。
 
 ## 1. 启动分发服务

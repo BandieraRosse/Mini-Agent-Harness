@@ -1,5 +1,7 @@
 # 验收记录
 
+[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+
 验证日期：2026-10-03。实际环境：Windows、Python 3.13.15、Windows PowerShell。
 
 ## 0.3.1 分发与安装
