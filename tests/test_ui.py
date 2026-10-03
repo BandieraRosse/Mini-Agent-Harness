@@ -98,6 +98,47 @@ class UITests(unittest.TestCase):
         terminal.toggle_details()
         self.assertIn("arguments", "".join(text for _, text in terminal.fragments()))
 
+    @unittest.skipUnless(importlib.util.find_spec("prompt_toolkit"), "prompt-toolkit is not installed")
+    def test_enhanced_source_selection_and_configuration_input(self):
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from miniagent.config import Config
+        from miniagent.settings import select_source
+        from unittest.mock import Mock
+
+        with create_pipe_input() as pipe:
+            def factory(**kwargs):
+                return PromptSession(input=pipe, output=DummyOutput(), **kwargs)
+
+            with patch("sys.stdin.isatty", return_value=True), patch(
+                    "prompt_toolkit.PromptSession", side_effect=factory):
+                terminal = Terminal(Redactor())
+            preferences = Mock()
+            preferences.config.return_value = Config(provider="openai")
+            ask = terminal.ask
+
+            def enter_url(label):
+                pipe.send_text("  https://example.com:8444/  \r")
+                return ask(label)
+
+            pipe.send_text("\x1b[B\r")
+            with patch.object(terminal, "ask", side_effect=enter_url):
+                config = select_source(terminal, preferences, Config())
+            self.assertEqual(config.endpoint, "https://example.com:8444/v1/chat/completions")
+            pipe.send_text("\r")
+            self.assertEqual(terminal.ask("default"), "")
+            pipe.send_text("\x03")
+            with self.assertRaises(KeyboardInterrupt):
+                terminal.ask("cancel")
+            pipe.send_text("\x04")
+            with self.assertRaises(EOFError):
+                terminal.ask("exit")
+            self.assertEqual(list(terminal.editor.history.get_strings()), [])
+            self.assertEqual(terminal.events, [])
+            pipe.send_text("continue\r")
+            self.assertEqual(terminal.read(), "continue")
+
     @unittest.skipUnless(importlib.util.find_spec("prompt_toolkit"), "Optional terminal extra is not installed")
     def test_enhanced_multiline_interrupt_and_return_to_input(self):
         from prompt_toolkit import PromptSession

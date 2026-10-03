@@ -557,9 +557,10 @@ class Terminal:
     def ask(self, label):
         # Separate prompt: configuration values never enter the conversation history.
         if self.editor:
-            from prompt_toolkit import prompt
-            return prompt(label + ' › ', input=self.editor.app.input,
-                          output=self.editor.app.output).strip()
+            from prompt_toolkit import PromptSession
+            session = PromptSession(input=self.editor.app.input,
+                                    output=self.editor.app.output)
+            return session.prompt(label + ' › ').strip()
         return input(label + ' › ').strip()
 
     def read(self):
