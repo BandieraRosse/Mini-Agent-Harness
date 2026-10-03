@@ -520,9 +520,16 @@ class Terminal:
         """Small no-side-effect picker; values are explicit choices, Escape cancels."""
         if self.editor is None:
             self.print(title)
-            for value, label in options:
-                self.print(f'  {value}  {label}')
-            return None
+            for index, (value, label) in enumerate(options, 1):
+                self.print(f'  {index}. {label}')
+            if not self.tty:
+                return None
+            answer = input('编号（留空取消） › ').strip()
+            if not answer:
+                return None
+            if answer.isdecimal() and 1 <= int(answer) <= len(options):
+                return options[int(answer) - 1][0]
+            raise ValueError('请输入菜单中的编号')
         from prompt_toolkit import Application
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.layout import HSplit, Layout
@@ -546,6 +553,14 @@ class Terminal:
             style=Style.from_dict(STYLES if self.color else {}),
             input=self.editor.app.input, output=self.editor.app.output)
         return app.run()
+
+    def ask(self, label):
+        # Separate prompt: configuration values never enter the conversation history.
+        if self.editor:
+            from prompt_toolkit import prompt
+            return prompt(label + ' › ', input=self.editor.app.input,
+                          output=self.editor.app.output).strip()
+        return input(label + ' › ').strip()
 
     def read(self):
         if self.editor:

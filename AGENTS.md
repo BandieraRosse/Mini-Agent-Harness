@@ -15,7 +15,7 @@ MiniAgent is a lightweight terminal coding tool focused on reliable execution, e
 | 任务 | 先读文档 | 主要代码 |
 | --- | --- | --- |
 | 理解 Agent 循环、上下文、会话和恢复 | [架构](docs/architecture.md) | `miniagent/context.py`、`core.py`、`messages.py`、`budget.py`、`api.py`、`sessions.py` |
-| 配置模型、启动、交互命令与排错 | [使用指南](docs/usage.md) | `miniagent/config.py`、`cli.py` |
+| 配置模型、ChatGPT 登录、启动与排错 | [使用指南](docs/usage.md) | `miniagent/config.py`、`settings.py`、`cli.py`、`chatgpt_auth.py`、`responses.py` |
 | 文件工具、补丁、命令和后台任务 | [工具参考](docs/tools.md) | `miniagent/tools.py`、`processes.py`、`security.py` |
 | 终端显示、输入、快捷键和审批 | [终端交互](docs/terminal.md) | `miniagent/ui.py`、`input.py`、`presentation.py` |
 | 构建、分发、安装和升级 | [分发与安装](docs/distribution.md) | `scripts/`、`pyproject.toml` |

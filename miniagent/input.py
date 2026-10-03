@@ -33,6 +33,8 @@ COMMANDS = (
     Command("model", "查看或切换模型", "[名称]"),
     Command("permissions", "查看或切换操作权限", "[ask|trust|read-only|rules|reset]", ("ask", "trust", "read-only", "rules", "reset"), ("approval",)),
     Command("new", "开始新会话，保留旧会话供恢复"),
+    Command("settings", "配置 API 来源、模型和登录凭据"),
+    Command("provider", "切换 API 来源", "[deepseek|openai|chatgpt|custom]", ("deepseek", "openai", "chatgpt", "custom")),
     Command("compact", "压缩较早的对话上下文"),
     Command("help", "显示命令和快捷键"),
     Command("quit", "保存会话并退出", aliases=("exit",)),

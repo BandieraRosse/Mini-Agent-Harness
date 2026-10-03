@@ -221,9 +221,10 @@ class ProcessManager:
             job.done.wait(min(0.05, remaining))
 
     def _environment(self) -> dict[str, str]:
+        current_secrets = (*self.secrets, *getattr(self.redact, "secrets", ()))
         environment = {key: value for key, value in os.environ.items()
                        if not re.search(r"api[_-]?key", key, re.IGNORECASE)
-                       and not any(secret in value for secret in self.secrets)}
+                       and not any(secret in value for secret in current_secrets)}
         environment["PYTHONIOENCODING"] = "utf-8"
         return environment
 

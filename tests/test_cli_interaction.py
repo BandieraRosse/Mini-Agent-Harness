@@ -27,6 +27,9 @@ class CLIInteractionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.workspace = Path(self.temp.name)
+        patched = patch("miniagent.config.user_directory", return_value=self.workspace / "profile")
+        patched.start()
+        self.addCleanup(patched.stop)
 
     def invoke(self, stdin, responses=(), arguments=()):
         queued = iter(responses)
@@ -74,7 +77,8 @@ class CLIInteractionTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(discovered, ["deepseek"])
         self.assertEqual(requests[0]["model"], "model-after")
-        self.assertEqual([item[0] for item in choose.call_args.args[1]], ["model-before", "model-after"])
+        self.assertEqual([item[0] for item in choose.call_args.args[1]],
+                         ["model-before", "model-after", "__miniagent_manual_model__"])
 
     def test_permissions_and_legacy_alias_change_actual_file_authorization(self):
         for index, (enable, disable) in enumerate((("/permissions", "/approval"), ("/approval", "/permissions"))):

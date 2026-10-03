@@ -4,6 +4,8 @@
 
 分发端和使用端均只要求 **Python 3.10+ 标准安装**。使用端无需 Git、pip、虚拟环境或编译器。发布包附带纯 Python 的 `prompt-toolkit`、`wcwidth` 及其许可证，保留完整终端交互。
 
+上述轻量发布包用于 API key 模式，不附带 ChatGPT 登录所需的可选 `PyJWT[crypto]` 及原生密码库。当前需要 ChatGPT 独立登录时，使用源码/pip 安装 `.[chatgpt]`，见 [使用指南](usage.md#chatgpt-订阅登录)；不要把登录凭据打进发布包。
+
 ## 1. 启动分发服务
 
 把本项目源码放在一台其他服务器可以访问的机器上，在项目根目录运行：
@@ -51,7 +53,7 @@ export PATH="$HOME/.local/bin:$PATH"
 miniagent -C /path/to/project
 ```
 
-启动时隐藏输入 API key；也可在目标项目中放置 `.deepseek_api_key` 或 `.openai_api_key`。分发包不带密钥，安装器不询问或保存密钥。
+启动后使用 `/settings` 选择 API 来源并登录或隐藏输入 API key。来源和模型保存于用户配置目录，key 可选择保存或仅本次使用；目录与安装版本分开，升级后仍然有效，详见 [用户配置与密钥](usage.md#用户配置与密钥)。分发包不带用户配置或密钥，安装器不询问或保存密钥。
 
 可指定路径，或在有多个 Python 时指定解释器：
 

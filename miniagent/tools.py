@@ -95,7 +95,8 @@ SCHEMAS = [
 
 
 def _protected(parts: tuple[str, ...]) -> bool:
-    return any(part.lower() in {".git", ".miniagent", ".deepseek_api_key", ".openai_api_key", ".api_key", ".env"}
+    return any(part.lower() in {".git", ".miniagent", ".deepseek_api_key", ".openai_api_key", ".api_key", ".env", "chatgpt-auth.dat", "chatgpt-auth.lock"}
+               or part.lower().startswith("chatgpt-auth-")
                or (part.lower().startswith(".env.") and not part.lower().endswith(".example"))
                for part in parts)
 
@@ -260,6 +261,9 @@ class ToolRegistry:
             raise ToolError("Path is outside the workspace or traverses an invalid symlink.", "PATH_DENIED") from exc
         if _protected(lexical.parts) or _protected(relative.parts):
             raise ToolError("Protected secret, Git metadata, or session path is unavailable.", "PATH_DENIED")
+        from .config import user_directory
+        if resolved.is_relative_to(user_directory().resolve()):
+            raise ToolError("MiniAgent user configuration and credentials are protected.", "PATH_DENIED")
         # Windows NTFS alternate streams must not bypass the filename checks.
         if any(":" in part for part in lexical.parts):
             raise ToolError("Alternate data streams are not supported.", "PATH_DENIED")

@@ -12,6 +12,7 @@ dependencies = ["prompt-toolkit>=3.0.43,<4"]
 
 [project.optional-dependencies]
 terminal = []
+chatgpt = ["PyJWT[crypto]>=2.10,<3"]
 
 [project.scripts]
 miniagent = "miniagent.cli:main"

@@ -5,6 +5,10 @@ from __future__ import annotations
 import getpass
 import ipaddress
 import math
+import os
+import json
+import hashlib
+import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,9 +18,79 @@ from urllib.parse import urlsplit
 PROVIDERS = {
     "deepseek": ("https://api.deepseek.com", "deepseek-flash", ".deepseek_api_key"),
     "openai": ("https://api.openai.com/v1", "gpt-6-astra", ".openai_api_key"),
+    "chatgpt": ("https://api.openai.com/v1", "gpt-6-astra", None),
     "custom": (None, None, ".api_key"),
 }
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
+
+
+def user_directory() -> Path:
+    if os.name == "nt":
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "MiniAgent"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "miniagent"
+
+
+def write_private(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError("Refusing to write configuration through a symlink")
+    fd, temporary = tempfile.mkstemp(prefix=".miniagent-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+class Preferences:
+    """Non-secret connection preferences, independent of install and workspace."""
+
+    def __init__(self):
+        self.path = user_directory() / "config.json"
+        try:
+            self.data = json.loads(self.path.read_text(encoding="utf-8-sig"))
+            if (not isinstance(self.data, dict) or not isinstance(self.data.get("provider", "deepseek"), str)
+                    or self.data.get("provider", "deepseek") not in PROVIDERS
+                    or not isinstance(self.data.get("profiles", {}), dict)):
+                raise ValueError()
+            for provider, profile in self.data.get("profiles", {}).items():
+                if provider not in PROVIDERS or not isinstance(profile, dict):
+                    raise ValueError()
+                Config(provider=provider, model=profile.get("model"), base_url=profile.get("base_url"))
+            if not isinstance(self.data.get("account", "default"), str):
+                raise ValueError()
+        except FileNotFoundError:
+            self.data = {}
+        except (ValueError, TypeError, UnicodeError):
+            raise ValueError("Invalid user config.json; repair or rename it before starting MiniAgent") from None
+
+    def config(self, provider=None, model=None, base_url=None, timeout=120):
+        provider = provider or self.data.get("provider", "deepseek")
+        profile = self.data.get("profiles", {}).get(provider, {})
+        return Config(provider=provider, model=model or profile.get("model"),
+                      base_url=base_url or profile.get("base_url"), timeout=timeout)
+
+    def save(self, config, account="default"):
+        profiles = dict(self.data.get("profiles", {}))
+        profiles[config.provider] = {"model": config.model, "base_url": config.base_url}
+        data = {"version": 1, "provider": config.provider, "account": account, "profiles": profiles}
+        write_private(self.path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        self.data = data
+
+
+def key_path(config: Config) -> Path:
+    # Bind credentials to the exact endpoint; editing a URL never forwards a saved key.
+    suffix = hashlib.sha256(config.endpoint.encode("utf-8")).hexdigest()[:24]
+    return user_directory() / "keys" / f"{config.provider}-{suffix}.key"
+
+
+def save_api_key(config: Config, key: str) -> None:
+    # mkdir(parents=True) applies mode only to the last directory, not its parents.
+    user_directory().mkdir(parents=True, exist_ok=True, mode=0o700)
+    write_private(key_path(config), _clean_key(key) + "\n")
 
 
 def _validate_base_url(value: str) -> str:
@@ -54,7 +128,7 @@ class Config:
 
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS:
-            raise ValueError("provider must be deepseek, openai, or custom")
+            raise ValueError("provider must be deepseek, openai, chatgpt, or custom")
         default_url, default_model, _ = PROVIDERS[self.provider]
         model = self.model if self.model is not None else default_model
         base_url = self.base_url if self.base_url is not None else default_url
@@ -62,6 +136,8 @@ class Config:
             raise ValueError("A model name is required; custom providers need --model")
         if base_url is None:
             raise ValueError("Custom providers need --base-url")
+        if self.provider == "chatgpt" and (not isinstance(base_url, str) or base_url.rstrip("/") != PROVIDERS["chatgpt"][0]):
+            raise ValueError("ChatGPT OAuth only supports the official OpenAI endpoint; omit --base-url")
         if (isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float))
                 or not math.isfinite(self.timeout) or self.timeout <= 0):
             raise ValueError("timeout must be a positive finite number")
@@ -75,6 +151,8 @@ class Config:
     @property
     def endpoint(self) -> str:
         base = str(self.base_url)
+        if self.provider == "chatgpt":
+            return base + "/responses"
         return base if base.endswith("/chat/completions") else base + "/chat/completions"
 
 
@@ -86,15 +164,16 @@ def _clean_key(value: str) -> str:
 
 
 def load_api_key(config: Config, workspace: Path) -> str:
-    """Read a development key file or prompt invisibly; never consult the environment.
-
-    The workspace wins over the installation directory. Only the selected provider's
-    file is read, so a custom endpoint cannot accidentally pick up another key.
-    """
+    """User keys first; import legacy default-provider files once, never overwrite."""
+    if config.provider == "chatgpt":
+        raise ValueError("ChatGPT uses independent OAuth login, not an API key file")
     filename = PROVIDERS[config.provider][2]
-    directories = dict.fromkeys((Path(workspace).resolve(), INSTALL_ROOT.resolve()))
-    for directory in directories:
-        path = directory / filename
+    target = key_path(config)
+    paths = [target]
+    if config.provider != "custom" and config.base_url == PROVIDERS[config.provider][0]:
+        paths.extend(directory / filename for directory in
+                     dict.fromkeys((Path(workspace).resolve(), INSTALL_ROOT.resolve())))
+    for path in paths:
         try:
             with path.open("r", encoding="utf-8-sig") as handle:
                 value = handle.read(8193)
@@ -104,13 +183,16 @@ def load_api_key(config: Config, workspace: Path) -> str:
             raise ValueError(f"Unable to read {filename}; check the key file and permissions") from None
         if len(value) > 8192:
             raise ValueError(f"{filename} is too large to be an API key")
-        return _clean_key(value)
+        key = _clean_key(value)
+        if path != target:
+            save_api_key(config, key)
+        return key
     try:
         # getpass otherwise falls back to visible stdin when no TTY is available.
         with warnings.catch_warnings():
             warnings.simplefilter("error", getpass.GetPassWarning)
             return _clean_key(getpass.getpass(f"{config.provider} API key (hidden): "))
     except getpass.GetPassWarning:
-        raise ValueError(f"Hidden input is unavailable; create {filename} or use an interactive terminal") from None
+        raise ValueError(f"Hidden input is unavailable; configure credentials in /settings or create {target}") from None
     except EOFError:
-        raise ValueError(f"No API key available; create {filename} or use an interactive terminal") from None
+        raise ValueError(f"No API key available; configure credentials in /settings or create {target}") from None

@@ -5,7 +5,13 @@ import re
 
 class Redactor:
     def __init__(self, *secrets):
-        self.secrets = tuple(sorted((s for s in secrets if s), key=len, reverse=True))
+        self.secrets = ()
+        self.add(*secrets)
+
+    def add(self, *secrets):
+        """Retain old and refreshed credentials for in-flight output redaction."""
+        self.secrets = tuple(sorted(set(self.secrets).union(s for s in secrets if isinstance(s, str) and s),
+                                    key=len, reverse=True))
 
     def __call__(self, text):
         text = str(text)

@@ -1,13 +1,23 @@
 import getpass
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from miniagent.config import Config, load_api_key
+from miniagent.config import Config, Preferences, key_path, load_api_key, save_api_key
 
 
 class ConfigTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.user_dir = Path(temporary.name) / "user"
+        patched = patch("miniagent.config.user_directory", return_value=self.user_dir)
+        patched.start()
+        self.addCleanup(patched.stop)
+
     def test_provider_defaults_and_endpoint(self):
         self.assertEqual(Config().model, "deepseek-flash")
         self.assertEqual(Config().endpoint, "https://api.deepseek.com/chat/completions")
@@ -16,6 +26,50 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.endpoint, "https://api.openai.com/v1/chat/completions")
         self.assertEqual(Config(base_url="https://example.com/v1/chat/completions/").endpoint,
                          "https://example.com/v1/chat/completions")
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits require Linux/macOS")
+    def test_first_key_save_creates_private_directories_and_file(self):
+        previous = os.umask(0o022)
+        try:
+            save_api_key(Config(), "synthetic-key")
+        finally:
+            os.umask(previous)
+        path = key_path(Config())
+        self.assertEqual(stat.S_IMODE(self.user_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_preferences_survive_restart_and_cli_overrides_do_not_persist(self):
+        saved = Preferences()
+        saved.save(Config(provider="openai", model="saved-model"), "personal")
+        saved.save(Config(model="deep-model"), "personal")
+        restarted = Preferences()
+        self.assertEqual(restarted.config().model, "deep-model")
+        self.assertEqual(restarted.config(provider="openai").model, "saved-model")
+        self.assertEqual(restarted.config(model="temporary").model, "temporary")
+        self.assertEqual(Preferences().config().model, "deep-model")
+        self.assertEqual(restarted.data["account"], "personal")
+
+    def test_user_key_wins_and_endpoint_changes_cannot_reuse_it(self):
+        config = Config()
+        save_api_key(config, "user-secret")
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            (workspace / ".deepseek_api_key").write_text("legacy-secret", encoding="utf-8")
+            self.assertEqual(load_api_key(config, workspace), "user-secret")
+            changed = Config(base_url="https://another.example/v1")
+            with patch("getpass.getpass", return_value="new-secret") as prompt:
+                self.assertEqual(load_api_key(changed, workspace), "new-secret")
+                prompt.assert_called_once()
+        self.assertNotEqual(key_path(config), key_path(changed))
+        self.assertEqual(key_path(config).read_text(encoding="utf-8").strip(), "user-secret")
+
+    def test_invalid_preferences_fail_without_echoing_contents(self):
+        self.user_dir.mkdir()
+        (self.user_dir / "config.json").write_text('{"provider": "secret"}', encoding="utf-8")
+        with self.assertRaises(ValueError) as caught:
+            Preferences()
+        self.assertNotIn("secret", str(caught.exception))
 
     def test_custom_requires_endpoint_and_model(self):
         for kwargs in ({}, {"model": "local-model"}, {"base_url": "http://localhost:9000/v1"}):
@@ -53,6 +107,7 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(load_api_key(config, workspace), "test-work-key")
                 prompt.assert_not_called()
                 self.assertNotIn("test-work-key", repr(config))
+                self.assertEqual(key_path(config).read_text(encoding="utf-8").strip(), "test-work-key")
 
     def test_provider_key_isolation_and_install_fallback(self):
         with tempfile.TemporaryDirectory() as root:

@@ -1,4 +1,4 @@
-"""CLI wiring; credentials live only for the lifetime of this process."""
+"""CLI wiring and interactive connection settings."""
 
 import argparse
 import os
@@ -8,7 +8,10 @@ from pathlib import Path
 
 from . import __version__
 from .api import APIError, ChatClient
-from .config import Config, load_api_key
+from .config import Config, Preferences, load_api_key, user_directory, key_path
+from .settings import select_source, credentials, DisconnectedClient
+from .chatgpt_auth import ChatGPTAuth
+from .responses import ResponsesClient
 from .context import fixed_messages
 from .core import Agent
 from .budget import CONTEXT_TOKENS
@@ -27,11 +30,13 @@ def positive_int(value):
 
 
 def parser():
-    result = argparse.ArgumentParser(description="MiniAgent: lightweight terminal coding assistant")
+    result = argparse.ArgumentParser(description="MiniAgent: lightweight terminal coding assistant",
+                                     epilog="ChatGPT authentication: miniagent login | logout | login-status [--account LABEL]")
     result.add_argument("task", nargs="?", help="Run one task and exit")
     result.add_argument("-p", "--prompt", help="Run one task and exit (alternative to positional task)")
     result.add_argument("-C", "--workspace", type=Path, default=Path.cwd())
-    result.add_argument("--provider", choices=["deepseek", "openai", "custom"], default="deepseek")
+    result.add_argument("--provider", choices=["deepseek", "openai", "chatgpt", "custom"])
+    result.add_argument("--account", help="Override the saved MiniAgent ChatGPT account label")
     result.add_argument("--model", help="Override the provider's model")
     result.add_argument("--base-url", help="Chat Completions base URL, e.g. https://api.openai.com/v1")
     result.add_argument("--timeout", type=positive_int, default=120, help="HTTP timeout in seconds")
@@ -55,8 +60,11 @@ def main(argv=None):
         for stream in (sys.stdout, sys.stderr):
             if hasattr(stream, "reconfigure"):
                 stream.reconfigure(encoding="utf-8", errors="replace")
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] in {"login", "logout", "login-status"}:
+        return auth_main(arguments)
     argparser = parser()
-    args = argparser.parse_args(argv)
+    args = argparser.parse_args(arguments)
     if args.task and args.prompt:
         argparser.error("use either a positional task or --prompt")
     if args.context_chars is not None and args.context_chars < 16_000:
@@ -70,19 +78,43 @@ def main(argv=None):
     ui = Terminal(Redactor(), approval="read-only" if args.read_only else "trust" if args.trust else "ask", plain=args.plain)
     ui.detailed = args.verbose
     try:
-        config = Config(provider=args.provider, model=args.model, base_url=args.base_url, timeout=args.timeout)
+        preferences = Preferences()
+        account = args.account or preferences.data.get("account", "default")
+        config = preferences.config(provider=args.provider, model=args.model, base_url=args.base_url, timeout=args.timeout)
         session = Session(workspace, config.provider, config.model, save=not args.no_save)
         if args.list_sessions:
             show_sessions(ui, session)
             return 0
         ui.print(f"MiniAgent {__version__} · {config.provider}/{config.model}", "36")
         ui.notice(f"目录: {workspace} | 权限: {ui.approval} | 保存: {'关闭' if args.no_save else '开启'}")
-        ui.notice("/ 查看命令 · Ctrl+T 工具详情 · Ctrl+C 中断当前工作")
+        ui.notice("/settings 配置来源和登录 · /model 切换模型 · / 查看命令")
+        interactive = not (args.task or args.prompt)
+        if interactive and ui.tty and not preferences.path.exists() and args.provider is None:
+            selected = select_source(ui, preferences, config)
+            if selected:
+                preferences.save(selected, account)
+                config = selected
+                session.data.update(provider=config.provider, model=config.model)
         fixed = fixed_messages(workspace)
-        key = load_api_key(config, workspace)
-        redact = Redactor(key)
+        redact = Redactor()
+        auth = None
+        key = None
+        connected = False
+        if not (interactive and ui.tty):
+            auth = ChatGPTAuth(account=account, redact=redact) if config.provider == "chatgpt" else None
+            key = None if auth else load_api_key(config, workspace)
+            if auth:
+                auth.access_token()
+            connected = True
+        redact.add(key)
         ui.redact, session.redact = redact, redact
-        client = ChatClient(config, key)
+        def make_client(settings):
+            if key is None and auth is None:
+                return DisconnectedClient(settings)
+            return ResponsesClient(settings, auth) if settings.provider == "chatgpt" else ChatClient(settings, key)
+        client = make_client(config)
+        if auth:
+            ui.notice(f"ChatGPT account: {account} (MiniAgent independent login)")
         ui.model = config.model
         known_models = [config.model]
         if ui.completer is not None:
@@ -98,6 +130,18 @@ def main(argv=None):
             ui.notice(f"已恢复 {session.data['id']}；后台任务不跨进程恢复。")
         agent = Agent(client, session, registry, redact.value(fixed), ui, args.max_rounds, args.context_chars,
                       args.context_tokens)
+
+        def connect(edit=False):
+            nonlocal key, auth, client, connected
+            if connected and not edit:
+                return
+            new_key, new_auth = credentials(ui, config, workspace, account, redact, edit=edit)
+            key, auth = new_key, new_auth
+            client = make_client(config)
+            agent.client = client
+            agent.fixed = redact.value(fixed)
+            connected = True
+
         task = args.prompt or args.task
         if task:
             return 0 if ui.run_action(lambda: agent.run(task), client=client, processes=processes) else 1
@@ -154,6 +198,7 @@ def main(argv=None):
                         session.save()
                         ui.notice(f"已保存 {session.path}" if session.enabled else "当前为 --no-save 模式，会话仅保存在内存。")
                     elif command == "/compact":
+                        connect()
                         if not ui.run_action(lambda: agent.compact(force=True), client=client, processes=processes):
                             ui.notice("当前没有需要压缩的较早上下文。")
                     elif command in {"/permissions", "/approval"}:
@@ -176,24 +221,77 @@ def main(argv=None):
                             raise ValueError("用法：/permissions ask|trust|read-only|rules|reset")
                         ui.approval = argument
                         ui.notice(f"权限模式: {argument}")
-                    elif command == "/model":
+                    elif command in {"/settings", "/provider"}:
+                        action = "provider" if command == "/provider" else ui.choose(
+                            f"设置 · {config.provider}/{config.model}", [
+                                ("provider", "切换 API 来源 / 编辑自定义地址"),
+                                ("model", "切换模型"), ("credentials", "登录 ChatGPT / 设置 API key"),
+                                ("account", "切换 ChatGPT 账号标签"), ("logout", "退出当前 ChatGPT 账号"),
+                                ("location", "查看配置和密钥文件位置"),
+                            ])
+                        if action == "model":
+                            command, argument = "/model", ""
+                        elif action == "provider":
+                            updated = select_source(ui, preferences, config, argument if command == "/provider" else "")
+                            if updated:
+                                preferences.save(updated, account)
+                                session.save()
+                                processes.close()
+                                processes = ProcessManager(workspace, ui.approve, redact)
+                                registry = ToolRegistry(workspace, processes, ui.approve, redact, lambda: ui.approval)
+                                ui.approval_rules.clear()
+                                config, key, auth, connected = updated, None, None, False
+                                client = make_client(config)
+                                session = Session(workspace, config.provider, config.model, save=not args.no_save, redact=redact)
+                                agent.client, agent.session, agent.tools = client, session, registry
+                                registry.bind_session(session)
+                                ui.model = config.model
+                                known_models[:] = [config.model]
+                                ui.clear_history()
+                                ui.notice(f"已切换来源: {config.provider}/{config.model}；已新建会话，下次请求时验证凭据。")
+                        elif action == "credentials":
+                            connect(edit=True)
+                            preferences.save(config, account)
+                            ui.notice("凭据已就绪。")
+                        elif action == "account":
+                            label = ui.ask("ChatGPT 账号标签（留空取消）")
+                            if label:
+                                ChatGPTAuth(account=label, redact=redact)
+                                preferences.save(config, label)
+                                account = label
+                                if config.provider == "chatgpt":
+                                    key, auth, connected = None, None, False
+                                ui.notice(f"ChatGPT 账号标签: {account}")
+                        elif action == "logout":
+                            revoked = ChatGPTAuth(account=account, redact=redact).logout()
+                            if config.provider == "chatgpt":
+                                auth, connected = None, False
+                            ui.notice("已退出本地 ChatGPT 登录。" + ("" if revoked else " 请在 ChatGPT 设置中确认断开 MiniAgent。"))
+                        elif action == "location":
+                            ui.print(f"用户配置: {preferences.path}\nChatGPT 凭据: {user_directory() / 'chatgpt-auth.dat'}")
+                            if config.provider != "chatgpt":
+                                ui.print(f"当前 API key: {key_path(config)}")
+                        if command != "/model":
+                            continue
+                    if command == "/model":
                         if not argument:
                             try:
+                                connect()
                                 available = ui.run_action(client.list_models, client=client)
                                 known_models[:] = list(dict.fromkeys([config.model, *available]))
-                            except APIError as error:
+                            except (APIError, ValueError, OSError) as error:
                                 ui.notice(f"未能获取模型列表：{error}；仍可输入 /model 模型名称。")
                             custom = "__miniagent_manual_model__"
                             options = [(name, name + ("（当前）" if name == config.model else "")) for name in known_models]
-                            if ui.editor is not None:
-                                options.append((custom, "输入其他模型名称…"))
+                            options.append((custom, "输入其他模型名称…"))
                             argument = ui.choose(f"模型 · {config.provider}", options)
                             if argument == custom:
-                                argument = ui.editor.prompt("模型名称 › ").strip()
+                                argument = ui.ask("模型名称")
                             if not argument:
                                 continue
                         updated_config = replace(config, model=argument)
-                        updated_client = ChatClient(updated_config, key)
+                        updated_client = make_client(updated_config)
+                        preferences.save(updated_config, account)
                         config, client = updated_config, updated_client
                         agent.client = client
                         ui.model = config.model
@@ -211,9 +309,10 @@ def main(argv=None):
                         ui.print(f"本次运行 tokens: {ui.tokens['prompt']} in | {ui.tokens['completion']} out")
                     elif command == "/paste" and ui.editor:
                         ui.notice("增强输入支持 Alt+Enter/Ctrl+J 换行，也可直接粘贴多行。")
-                    else:
+                    elif command not in {"/help", "/new", "/clear", "/sessions", "/resume", "/save", "/compact", "/permissions", "/approval"}:
                         ui.error("未知命令或参数；输入 /help 查看帮助。")
                     continue
+                connect()
                 ui.run_action(lambda: agent.run(prompt), client=client, processes=processes)
             except KeyboardInterrupt:
                 ui.end_stream()
@@ -247,3 +346,31 @@ def show_sessions(ui, session):
         ui.notice("当前项目没有保存的会话。")
     for item in items[:30]:
         ui.print(f"{item['id']}  {item['title']}")
+
+
+def auth_main(arguments):
+    command = arguments[0]
+    cli = argparse.ArgumentParser(prog=f"miniagent {command}", description="Manage MiniAgent's independent ChatGPT login")
+    cli.add_argument("--provider", choices=["chatgpt"], default="chatgpt")
+    cli.add_argument("--account", help="Separate account label; defaults to the saved label")
+    args = cli.parse_args(arguments[1:])
+    try:
+        args.account = args.account or Preferences().data.get("account", "default")
+        auth = ChatGPTAuth(account=args.account)
+        if command == "login":
+            auth.login()
+            print(f"ChatGPT account '{args.account}' signed in. Model access is checked on the first request.")
+        elif command == "login-status":
+            print(auth.status())
+        else:
+            revoked = auth.logout()
+            print(f"ChatGPT account '{args.account}' signed out locally.")
+            if not revoked:
+                print("Remote revocation was not confirmed. Disconnect MiniAgent in ChatGPT Settings.")
+        return 0
+    except KeyboardInterrupt:
+        print("ChatGPT login operation interrupted.", file=sys.stderr)
+        return 130
+    except (ValueError, OSError) as error:
+        print(str(error), file=sys.stderr)
+        return 1

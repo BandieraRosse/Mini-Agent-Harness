@@ -23,6 +23,9 @@ class CLITests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.workspace = Path(self.temp.name)
+        patched = patch("miniagent.config.user_directory", return_value=self.workspace / "profile")
+        patched.start()
+        self.addCleanup(patched.stop)
 
     def invoke(self, arguments, responses=(), stdin=""):
         queued = iter(responses)

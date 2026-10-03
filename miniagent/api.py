@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import ssl
 import threading
 import time
 import urllib.error
@@ -37,6 +38,26 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _connection_failure(error):
+    """Classify without exposing exception strings, proxy passwords or headers."""
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return "TLS certificate verification failed; check system trust and proxy certificates (verification remains enabled)"
+    if isinstance(reason, ssl.SSLEOFError):
+        return "TLS connection closed unexpectedly (SSL EOF); check the proxy/VPN connection and retry"
+    if isinstance(reason, ssl.SSLError):
+        return "TLS handshake failed; check the proxy/VPN and system TLS configuration"
+    if isinstance(reason, socket.gaierror):
+        return "DNS lookup failed; check network and proxy hostname resolution"
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return "Connection timed out; check the network/proxy or increase --timeout"
+    if isinstance(reason, ConnectionRefusedError):
+        return "Connection refused; check that the configured proxy or endpoint is running"
+    if isinstance(reason, (ConnectionResetError, http.client.RemoteDisconnected)):
+        return "Connection reset or closed by the peer; check the network/proxy and retry"
+    return "Connection failed; check the endpoint, network and proxy settings"
+
+
 class _HTTPHandler(urllib.request.HTTPHandler):
     def __init__(self, client):
         super().__init__()
@@ -56,14 +77,14 @@ class _HTTPSHandler(urllib.request.HTTPSHandler):
                             context=self._context)
 
 
-def _events(response: Any) -> Iterator[str]:
+def _events(response: Any, terminal: str = "[DONE]") -> Iterator[str]:
     """Parse complete SSE events, including comments and multiline data fields."""
     data: list[str] = []
     event_bytes = total_bytes = 0
     while True:
         raw = response.readline(MAX_EVENT_BYTES + 1)
         if not raw:
-            raise APIError("API stream ended before [DONE]; no tool calls were accepted")
+            raise APIError(f"API stream ended before {terminal}; no tool calls were accepted")
         total_bytes += len(raw)
         event_bytes += len(raw)
         if event_bytes > MAX_EVENT_BYTES or total_bytes > MAX_RESPONSE_BYTES:
@@ -171,7 +192,7 @@ class ChatClient:
     def list_models(self) -> list[str]:
         """Return validated model IDs advertised by this endpoint; never change models."""
         self.check_cancelled()
-        endpoint = self.config.endpoint.removesuffix("/chat/completions") + "/models"
+        endpoint = self.config.endpoint.removesuffix("/chat/completions").removesuffix("/responses") + "/models"
         request = urllib.request.Request(endpoint, headers={
             "Authorization": f"Bearer {self._api_key}", "Accept": "application/json",
             "User-Agent": f"MiniAgent/{__version__}"}, method="GET")
@@ -185,6 +206,7 @@ class ChatClient:
                 data = json.loads(raw)
             except (ValueError, UnicodeError):
                 raise APIError("API model list is not valid JSON") from None
+            data = self._model_catalog(data)
             if (not isinstance(data, dict) or not isinstance(data.get("data"), list)
                     or len(data["data"]) > 4096):
                 raise APIError("API returned no valid model list")
@@ -209,19 +231,23 @@ class ChatClient:
                 error.close()
             self.check_cancelled()
             raise APIError(f"API HTTP {error.code}: {detail}", error.code) from None
-        except (urllib.error.URLError, OSError, http.client.HTTPException):
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
             self.check_cancelled()
-            raise APIError("Unable to load models; check the endpoint and network") from None
+            raise APIError("Unable to load models: " + _connection_failure(error)) from None
         finally:
             self._active_socket = None
 
     def redact(self, text: str) -> str:
         return text.replace(self._api_key, "[REDACTED]")
 
+    def _model_catalog(self, data):
+        return data
+
     def _payload(self, messages: list, tools: list | None, stream: bool) -> dict:
         clean_messages = []
         for message in messages:
             clean = dict(message)
+            clean.pop("responses_reasoning", None)
             phase = clean.pop("phase", None)
             if clean.pop('completion_deferred', False):
                 phase = 'commentary'
@@ -316,8 +342,8 @@ class ChatClient:
                                    error.code in TRANSIENT_STATUSES)
             except (TimeoutError, socket.timeout):
                 failure = APIError("API request timed out; try again or increase --timeout", retryable=True)
-            except (urllib.error.URLError, OSError, http.client.HTTPException):
-                failure = APIError("API connection failed; check the endpoint and network", retryable=True)
+            except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+                failure = APIError("API connection failed: " + _connection_failure(error), retryable=True)
             except APIError as error:
                 failure = error
             finally:
