@@ -1,8 +1,14 @@
 # 验收记录
 
-[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+[文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
 验证日期：2026-10-03。实际环境：Windows、Python 3.13.15、Windows PowerShell。
+
+## 单会话文件修改：移除哈希校验
+
+移除文件工具的 SHA-256 返回、`expected_sha256` 参数和审批后内容版本复查。保留唯一文本匹配、严格补丁上下文、审批拒绝不写入、CRLF/权限保留和多文件写入前检查。文件修改不保证并发安全；下文散列冲突与版本复查测试属于历史验收。
+
+运行 `.venv/Scripts/python.exe -m unittest discover -s tests -q`：**166 项测试，164 项通过，2 项跳过，无失败**。`python -m compileall -q miniagent agent.py` 和 `git diff --check` 通过。本轮未执行真实模型 API 验证。
 
 ## 0.3.1 分发与安装
 

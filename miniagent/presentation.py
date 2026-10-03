@@ -45,7 +45,8 @@ def _edit_paths(record):
     paths = [item.get("path", "?") if isinstance(item, dict) else str(item)
              for item in result.get("files", [])]
     if not paths:
-        paths = list(record.args.get("expected_sha256", {})) if isinstance(record.args.get("expected_sha256"), dict) else []
+        paths = [line[6:].split("\t", 1)[0] for line in str(record.args.get("patch", "")).splitlines()
+                 if line.startswith("+++ b/")]
     return ", ".join(paths) or str(result.get("path", record.args.get("path", "files")))
 
 

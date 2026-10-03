@@ -1,4 +1,4 @@
-"""Small, bounded workspace tools with optimistic concurrency for file edits.
+"""Small, bounded workspace tools for single-session file edits.
 
 Path checks help avoid accidents. Shell commands still run with the user's own
 permissions: this module is not a security sandbox.
@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
-import hashlib
 import math
 import os
 from pathlib import Path
@@ -27,7 +26,6 @@ BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".pdf", ".z
                    ".gz", ".tar", ".7z", ".exe", ".dll", ".so", ".pyc", ".pyo",
                    ".mp3", ".mp4", ".woff", ".woff2", ".ttf", ".sqlite", ".db",
                    ".bin", ".class", ".o", ".obj", ".a", ".lib", ".dylib", ".bmp"}
-_HASH = re.compile(r"[0-9a-fA-F]{64}\Z")
 _HUNK = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?\Z")
 
 
@@ -60,21 +58,20 @@ SCHEMAS = [
              "case_sensitive": {"type": "boolean"},
              "offset": {"type": "integer", "minimum": 0},
              "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, ["query"]),
-    _schema("read_file", "Read line-numbered UTF-8 text and its sha256. Continue with next_offset/next_column when truncated.",
+    _schema("read_file", "Read line-numbered UTF-8 text. Continue with next_offset/next_column when truncated.",
             {"path": _string("Workspace-relative file"),
              "offset": {"type": "integer", "minimum": 1, "description": "First line, default 1"},
              "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
              "column": {"type": "integer", "minimum": 0, "description": "Character offset within first line; default 0"}}, ["path"]),
     _schema("create_file", "Create a UTF-8 file without overwriting. Shows a diff before approval. Creates missing parent directories.",
             {"path": _string("Workspace-relative new file"), "content": _string("Complete content")}, ["path", "content"]),
-    _schema("replace_text", "Replace one unique exact text match. Supply sha256 from read_file; stale files are rejected. Shows diff before approval.",
+    _schema("replace_text", "Replace one unique exact text match. Shows diff before approval.",
             {"path": _string("Workspace-relative file"), "old_text": _string("Nonempty unique existing text"),
-             "new_text": _string("Replacement text"), "expected_sha256": _string("Required hash from read_file")},
-            ["path", "old_text", "new_text", "expected_sha256"]),
+             "new_text": _string("Replacement text")},
+            ["path", "old_text", "new_text"]),
     _schema("apply_patch", "Apply strict unified diff to existing files, with exact context and no fuzz. All files are preflighted before writing. No renames/additions/deletions; use create_file for additions.",
-            {"patch": _string("Unified diff using --- a/path and +++ b/path headers"),
-             "expected_sha256": {"type": "object", "description": "Map each relative file path to hash from read_file", "additionalProperties": {"type": "string"}}},
-            ["patch", "expected_sha256"]),
+            {"patch": _string("Unified diff using --- a/path and +++ b/path headers")},
+            ["patch"]),
     _schema("run_command", "Run a shell command after user approval. Use background for long work, then poll_command. Commands run with user permissions.",
             {"command": _string("Shell command"), "cwd": _string("Workspace-relative directory, default '.'"),
              "timeout": {"type": "number", "minimum": 0, "maximum": 86400, "description": "Positive seconds before termination, default 120"},
@@ -90,10 +87,6 @@ def _protected(parts: tuple[str, ...]) -> bool:
     return any(part.lower() in {".git", ".miniagent", ".deepseek_api_key", ".openai_api_key", ".api_key", ".env"}
                or (part.lower().startswith(".env.") and not part.lower().endswith(".example"))
                for part in parts)
-
-
-def _sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _newline(text: str) -> str:
@@ -356,7 +349,7 @@ class ToolRegistry:
 
     def _read_file(self, path: str, offset: int = 1, limit: int = 200, column: int = 0) -> dict:
         target = self._path(path)
-        data, content = self._read(target)
+        _, content = self._read(target)
         # Redact before paging so a key split across two pages cannot be reconstructed.
         content = self.redact(content)
         lines = content.splitlines(keepends=True)
@@ -383,17 +376,9 @@ class ToolRegistry:
             index += 1
             consumed += 1
             next_column = 0
-        return {"ok": True, "path": self._relative(target), "sha256": _sha(data),
+        return {"ok": True, "path": self._relative(target),
                 "content": "\n".join(output), "total_lines": len(lines), "offset": offset,
                 "next_offset": index + 1, "next_column": next_column, "truncated": index < len(lines)}
-
-    def _checked(self, path: Path, expected_sha256: str) -> tuple[bytes, str]:
-        if not isinstance(expected_sha256, str) or not _HASH.fullmatch(expected_sha256):
-            raise ToolError("expected_sha256 must be the SHA-256 returned by read_file.")
-        data, content = self._read(path)
-        if _sha(data) != expected_sha256.lower():
-            raise ToolError("File changed since it was read. Read it again before editing.")
-        return data, content
 
     def _diff(self, path: Path, before: str, after: str) -> str:
         name = self._relative(path)
@@ -420,7 +405,7 @@ class ToolRegistry:
     def _create_file(self, path: str, content: str) -> dict:
         target = self._path(path)
         if target.exists():
-            raise ToolError("File already exists; use replace_text or apply_patch with its current hash.")
+            raise ToolError("File already exists; use replace_text or apply_patch.")
         data = content.encode("utf-8")
         if len(data) > MAX_FILE_BYTES:
             raise ToolError("New file exceeds the file size limit.")
@@ -437,12 +422,12 @@ class ToolRegistry:
             os.link(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
-        return {"ok": True, "path": self._relative(target), "sha256": _sha(data),
+        return {"ok": True, "path": self._relative(target),
                 "diff": _bounded_text(diff), "diff_truncated": len(diff) > MAX_OUTPUT_CHARS}
 
-    def _replace_text(self, path: str, old_text: str, new_text: str, expected_sha256: str) -> dict:
+    def _replace_text(self, path: str, old_text: str, new_text: str) -> dict:
         target = self._path(path)
-        original, before = self._checked(target, expected_sha256)
+        original, before = self._read(target)
         if not old_text:
             raise ToolError("old_text must not be empty.")
         # Prefer the literal match; allow LF input against a CRLF file as a convenience.
@@ -472,14 +457,11 @@ class ToolRegistry:
         staged: list[tuple[Path, Path]] = []
         applied = []
         try:
-            # Stage everything and recheck all inputs after approval, before the first write.
-            for target, original, updated in changes:
+            # Stage everything before the first write.
+            for target, _, updated in changes:
                 if self._path(str(target)) != target:
                     raise ToolError("Path changed while awaiting approval.")
-                self._checked(target, _sha(original))
                 staged.append((target, self._stage(target, updated, stat.S_IMODE(target.stat().st_mode))))
-            for target, original, _ in changes:
-                self._checked(target, _sha(original))
             for target, temporary in staged:
                 os.replace(temporary, target)
                 applied.append(self._relative(target))
@@ -491,28 +473,21 @@ class ToolRegistry:
             for _, temporary in staged:
                 temporary.unlink(missing_ok=True)
         return {"ok": True, "changed": True,
-                "files": [{"path": self._relative(path), "sha256": _sha(after)} for path, _, after in changes],
+                "files": [{"path": self._relative(path)} for path, _, _ in changes],
                 "diff": _bounded_text(diff), "diff_truncated": len(diff) > MAX_OUTPUT_CHARS}
 
-    def _apply_patch(self, patch: str, expected_sha256: dict) -> dict:
+    def _apply_patch(self, patch: str) -> dict:
         sections = _parse_patch(patch)
         changes = []
         seen: set[Path] = set()
-        keys: set[str] = set()
         for name, hunks in sections:
             target = self._path(name)
             if target in seen:
                 raise ToolError("A patch must contain only one section per file.")
             seen.add(target)
-            key = self._relative(target)
-            keys.add(key)
-            if key not in expected_sha256:
-                raise ToolError(f"Missing expected_sha256 for {key}.")
-            original, content = self._checked(target, expected_sha256[key])
+            original, content = self._read(target)
             updated = _apply_hunks(content, hunks)
             changes.append((target, original, updated.encode("utf-8")))
-        if set(expected_sha256) != keys:
-            raise ToolError("expected_sha256 keys must exactly match the patch's workspace-relative paths.")
         return self._commit(changes)
 
     def _run_command(self, command: str, cwd: str = ".", timeout: float = 120, background: bool = False) -> dict:

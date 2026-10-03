@@ -1,6 +1,6 @@
 # 架构与开发
 
-[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+[文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
 MiniAgent 的核心仍然是可读的小型同步循环：上下文 → 模型请求 → 工具调用 → 真实结果 → 下次请求。核心不依赖 SDK、数据库或服务进程。Python 3.10+；终端使用一个直接依赖 `prompt-toolkit`，普通输出仍可使用 `--plain`。
 

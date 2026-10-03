@@ -8,10 +8,10 @@ def rendered(record, detailed=False):
 
 
 class PresentationTests(unittest.TestCase):
-    def test_read_summary_names_range_without_contents_or_hash(self):
+    def test_read_summary_names_range_without_contents(self):
         record = ToolRecord("read_file", {"path": "中文.py"}, {
             "ok": True, "path": "中文.py", "offset": 5, "total_lines": 20,
-            "content": "5: private detail\n6: second", "sha256": "a" * 64,
+            "content": "5: private detail\n6: second",
             "truncated": True,
         })
         text = rendered(record)
@@ -19,7 +19,6 @@ class PresentationTests(unittest.TestCase):
         self.assertIn("5–6 / 20", text)
         self.assertIn("截断", text)
         self.assertNotIn("private detail", text)
-        self.assertNotIn("a" * 64, text)
 
     def test_search_summaries_count_returned_results(self):
         for name, args, field in [("search_text", {"query": "你好English"}, "matches"),
@@ -62,15 +61,16 @@ class PresentationTests(unittest.TestCase):
 
     def test_edit_summary_counts_diff_and_names_files(self):
         diff = "--- a/x.py\n+++ b/x.py\n@@ -1 +1,2 @@\n-old\n+new\n+extra\n"
-        record = ToolRecord("apply_patch", {"patch": diff, "expected_sha256": {"x.py": "a" * 64}}, {
-            "ok": True, "files": [{"path": "x.py", "sha256": "b" * 64}], "diff": diff})
+        record = ToolRecord("apply_patch", {"patch": diff}, {
+            "ok": True, "files": [{"path": "x.py"}], "diff": diff})
         text = rendered(record)
         self.assertIn("x.py", text)
         self.assertIn("+2 −1", text)
         self.assertNotIn("a" * 64, text)
         self.assertNotIn("+extra", text)
         fragments = tool_fragments(record, True)
-        self.assertIn("a" * 64, rendered(record, True))
+        self.assertIn(diff.rstrip(), rendered(record, True).replace("    ", ""))
+        self.assertIn("Edit x.py", rendered(ToolRecord("apply_patch", {"patch": diff})))
         self.assertIn(("class:diff.add", "    +extra\n"), fragments)
         self.assertIn(("class:diff.remove", "    -old\n"), fragments)
 

@@ -30,6 +30,15 @@ This is a deliberately small Agent Harness for learning the relationship between
 - 行为变化同步更新对应专题；导航变化同步更新本文件与文档索引。验收记录只写实际执行过的验证，并区分历史记录与当前结果。
 - 根据改动运行相关测试；完整回归命令为 `python -m unittest discover -s tests -v`，提交前检查 `git diff --check`。
 
+## Windows / PowerShell 文本编辑
+
+- 本仓库主要在原生 Windows / PowerShell 下开发，以下约定供 Codex 等开发 Agent 遵循。源码、Markdown、JSON、TOML 等文本按 UTF-8 处理，不依赖 Windows PowerShell 5.1 的默认编码。
+- 使用 `Get-Content`、`Set-Content`、`Out-File` 处理文本时显式指定 UTF-8；不要用默认编码的重定向写入仓库文件。PowerShell 5.1 的 `-Encoding UTF8` 会写入 BOM；写回时保留原文件 BOM 状态，必要时使用显式配置编码的 .NET 或 Python 文件 API。
+- 不要将含中文或其他非 ASCII 字符的 PowerShell here-string 经管道传给 `python -` 等原生程序。管道标准输入与文件编码是不同边界，仅指定 Python 文件编码不能防止字符损坏；此类脚本优先用 `apply_patch` 创建 UTF-8 脚本文件后执行。
+- 小范围编辑优先使用 `apply_patch`。脚本化修改优先使用结构化定位或短 ASCII 锚点，避免经 PowerShell 传递长中文段落做精确替换。Python 读写显式指定 `encoding="utf-8"`，已有 BOM 时使用 `utf-8-sig`；保留原有 CRLF/LF 和 BOM，注意文本 API 的默认换行转换，不做无关的全文件重写或编码规范化。
+- 精确匹配或补丁失败后，先以 UTF-8 重新读取相关区域，核对磁盘上的内容后再修改，不猜测原文或反复重试旧文本。发现乱码或问号替换时，停止受影响的写入，先修正传输或解码方式。
+- 修改后查看 `git diff` 并运行 `git diff --check`，确认中文可读、改动范围正确，没有意外 BOM、换行变化或无关重写；文档修改另检查相关链接与内容一致性。
+
 ## 指令与文档的加载边界
 
 本文件约束本仓库的开发。`miniagent/instructions.md` 是程序内置的运行指令，修改它会影响 MiniAgent 的行为。

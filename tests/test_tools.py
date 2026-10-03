@@ -1,5 +1,4 @@
 """Behavioral checks for bounded reads and changes that preserve existing work."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,10 +7,6 @@ import tempfile
 import unittest
 
 from miniagent.tools import MAX_OUTPUT_CHARS, ToolRegistry
-
-
-def sha(data):
-    return hashlib.sha256(data).hexdigest()
 
 
 class FakeProcesses:
@@ -49,13 +44,13 @@ class ToolTests(unittest.TestCase):
     def call(self, name, **arguments):
         return self.registry.execute(name, arguments)
 
-    def test_read_paging_hash_and_redaction(self):
+    def test_read_paging_and_redaction(self):
         original = b"one\r\nSECRET\r\nthree\r\n"
         self.write("sample.txt", original)
         first = self.call("read_file", path="sample.txt", limit=2)
         self.assertTrue(first["ok"])
         self.assertEqual(first["content"], "1: one\n2: [redacted]")
-        self.assertEqual(first["sha256"], sha(original))
+        self.assertNotIn("sha256", first)
         self.assertTrue(first["truncated"])
         second = self.call("read_file", path="sample.txt", offset=first["next_offset"])
         self.assertEqual(second["content"], "3: three")
@@ -82,25 +77,25 @@ class ToolTests(unittest.TestCase):
         result = self.call("search_text", query="SECRET")
         self.assertNotIn("SE", result["matches"][1]["text"])
 
-    def test_replace_requires_unique_match_and_current_hash(self):
+    def test_replace_requires_unique_match(self):
         path = self.write("sample.txt", "one one\n")
-        current = sha(path.read_bytes())
-        result = self.call("replace_text", path="sample.txt", old_text="one", new_text="two", expected_sha256=current)
+        result = self.call("replace_text", path="sample.txt", old_text="one", new_text="two")
         self.assertFalse(result["ok"])
         self.assertIn("2 times", result["error"])
         self.assertEqual(path.read_text(), "one one\n")
         path.write_text("changed\n")
-        result = self.call("replace_text", path="sample.txt", old_text="changed", new_text="two", expected_sha256=current)
-        self.assertFalse(result["ok"])
-        self.assertIn("changed since", result["error"])
-        self.assertEqual(self.approvals, [])
+        result = self.call("replace_text", path="sample.txt", old_text="changed", new_text="two")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(path.read_text(), "two\n")
+        self.assertEqual(len(self.approvals), 1)
+        self.assertNotIn("sha256", result["files"][0])
 
     def test_replace_preserves_crlf_permissions_and_unrelated_text(self):
         path = self.write("sample.txt", b"keep\r\nold\r\nlast\r\n")
         if os.name != "nt":
             path.chmod(0o751)
         original_mode = stat.S_IMODE(path.stat().st_mode)
-        result = self.call("replace_text", path="sample.txt", old_text="old\n", new_text="new\nextra\n", expected_sha256=sha(path.read_bytes()))
+        result = self.call("replace_text", path="sample.txt", old_text="old\n", new_text="new\nextra\n")
         self.assertTrue(result["ok"], result)
         self.assertEqual(path.read_bytes(), b"keep\r\nnew\r\nextra\r\nlast\r\n")
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), original_mode)
@@ -109,19 +104,22 @@ class ToolTests(unittest.TestCase):
 
     def test_overlapping_matches_are_ambiguous(self):
         path = self.write("overlap.txt", "aaa")
-        result = self.call("replace_text", path="overlap.txt", old_text="aa", new_text="b", expected_sha256=sha(path.read_bytes()))
+        result = self.call("replace_text", path="overlap.txt", old_text="aa", new_text="b")
         self.assertFalse(result["ok"])
         self.assertEqual(path.read_bytes(), b"aaa")
 
-    def test_recheck_hash_after_user_approval(self):
+    def test_file_edit_approval_denial_has_no_effect(self):
         path = self.write("sample.txt", "old\n")
-        def concurrently_edit(kind, detail):
-            path.write_bytes(b"user edit\n")
-            return True
-        self.registry.approve = concurrently_edit
-        result = self.call("replace_text", path="sample.txt", old_text="old", new_text="new", expected_sha256=sha(path.read_bytes()))
+        self.registry.approve = lambda *_: False
+        result = self.call("replace_text", path="sample.txt", old_text="old", new_text="new")
         self.assertFalse(result["ok"])
-        self.assertEqual(path.read_bytes(), b"user edit\n")
+        self.assertTrue(result["declined"])
+        self.assertEqual(path.read_bytes(), b"old\n")
+        patch = "--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-old\n+new\n"
+        result = self.call("apply_patch", patch=patch)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["declined"])
+        self.assertEqual(path.read_bytes(), b"old\n")
         self.assertEqual(list(self.root.glob(".miniagent-edit-*")), [])
 
     def test_create_never_overwrites_and_approval_denial_has_no_effect(self):
@@ -152,7 +150,7 @@ class ToolTests(unittest.TestCase):
         first = self.write("one.txt", "a\nb\nc\nd\ne\n")
         second = self.write("two.txt", b"x\r\ny\r\n")
         patch = "--- a/one.txt\n+++ b/one.txt\n@@ -1,2 +1,2 @@\n a\n-b\n+B\n@@ -4,2 +4,3 @@\n d\n-e\n+E\n+F\n--- a/two.txt\n+++ b/two.txt\n@@ -1,2 +1,2 @@\n x\n-y\n+Y\n"
-        result = self.call("apply_patch", patch=patch, expected_sha256={"one.txt": sha(first.read_bytes()), "two.txt": sha(second.read_bytes())})
+        result = self.call("apply_patch", patch=patch)
         self.assertTrue(result["ok"], result)
         self.assertEqual(first.read_bytes(), b"a\nB\nc\nd\nE\nF\n")
         self.assertEqual(second.read_bytes(), b"x\r\nY\r\n")
@@ -162,7 +160,7 @@ class ToolTests(unittest.TestCase):
         first = self.write("one.txt", "old\n")
         second = self.write("two.txt", "user changed\n")
         patch = "--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n-old\n+new\n--- a/two.txt\n+++ b/two.txt\n@@ -1 +1 @@\n-wrong\n+new\n"
-        result = self.call("apply_patch", patch=patch, expected_sha256={"one.txt": sha(first.read_bytes()), "two.txt": sha(second.read_bytes())})
+        result = self.call("apply_patch", patch=patch)
         self.assertFalse(result["ok"])
         self.assertEqual(first.read_bytes(), b"old\n")
         self.assertEqual(second.read_bytes(), b"user changed\n")
@@ -171,22 +169,22 @@ class ToolTests(unittest.TestCase):
     def test_patch_invalid_later_hunk_is_atomic(self):
         path = self.write("one.txt", "a\nb\nc\n")
         patch = "--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n-a\n+A\n@@ -3 +3 @@\n-wrong\n+C\n"
-        result = self.call("apply_patch", patch=patch, expected_sha256={"one.txt": sha(path.read_bytes())})
+        result = self.call("apply_patch", patch=patch)
         self.assertFalse(result["ok"])
         self.assertEqual(path.read_bytes(), b"a\nb\nc\n")
 
     def test_patch_supports_insertions_and_no_final_newline(self):
         path = self.write("one.txt", "end")
         patch = "--- a/one.txt\n+++ b/one.txt\n@@ -1 +1,2 @@\n-end\n\\ No newline at end of file\n+start\n+finish\n\\ No newline at end of file\n"
-        result = self.call("apply_patch", patch=patch, expected_sha256={"one.txt": sha(path.read_bytes())})
+        result = self.call("apply_patch", patch=patch)
         self.assertTrue(result["ok"], result)
         self.assertEqual(path.read_bytes(), b"start\nfinish")
         patch = "--- a/one.txt\n+++ b/one.txt\n@@ -0,0 +1 @@\n+top\n"
-        result = self.call("apply_patch", patch=patch, expected_sha256={"one.txt": sha(path.read_bytes())})
+        result = self.call("apply_patch", patch=patch)
         self.assertTrue(result["ok"], result)
         self.assertEqual(path.read_bytes(), b"top\nstart\nfinish")
 
-    def test_patch_rejects_bad_counts_missing_hash_and_traversal(self):
+    def test_patch_rejects_bad_counts_and_traversal(self):
         path = self.write("one.txt", "old\n")
         patches = [
             "--- a/one.txt\n+++ b/one.txt\n@@ -2 +1 @@\n-old\n+new\n",
@@ -195,11 +193,9 @@ class ToolTests(unittest.TestCase):
         ]
         for patch in patches:
             with self.subTest(patch=patch):
-                result = self.call("apply_patch", patch=patch, expected_sha256={"one.txt": sha(path.read_bytes())})
+                result = self.call("apply_patch", patch=patch)
                 self.assertFalse(result["ok"])
                 self.assertEqual(path.read_bytes(), b"old\n")
-        valid = "--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n-old\n+new\n"
-        self.assertFalse(self.call("apply_patch", patch=valid, expected_sha256={})["ok"])
 
     def test_protected_and_external_paths_are_unavailable(self):
         for name in (".deepseek_api_key", ".openai_api_key", ".api_key", ".env", ".env.local", ".git/config", ".miniagent/session.json"):

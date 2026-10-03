@@ -1,6 +1,6 @@
 # 终端交互
 
-[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+[文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
 安装后运行 `miniagent`，或在项目目录运行 `python agent.py`。增强终端使用 `prompt-toolkit`，它已列为默认依赖：
 

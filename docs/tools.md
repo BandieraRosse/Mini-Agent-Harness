@@ -1,6 +1,6 @@
 # 工具参考
 
-[????](README.md) ? [????](../README.md) ? [Agent ????](../AGENTS.md)
+[文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
 工具定义来自 `miniagent/tools.py` 的 `SCHEMAS`，使用 Chat Completions function calling 格式。所有调用通过 `ToolRegistry.execute(name, arguments)` 返回 JSON 对象；`ok: false` 表示失败，细节来自 `error` 或命令的 `output`、`exit_code`。参数拼写、类型、范围错误也返回工具结果，Agent 可以据此修正调用。
 
@@ -11,7 +11,7 @@
 | `list_directory(path=".", offset=0, limit=100)` | 列出目录，目录优先。`entries` 含 `path`、`type`；用 `next_offset` 翻页。 |
 | `find_files(pattern="*", path=".", offset=0, limit=100)` | 对工作区相对路径做 glob 匹配，无斜杠的模式匹配文件名。`**` 可匹配零级或多级目录，`*?[]` 不跨目录；返回 `files`，用 `next_offset` 翻页。 |
 | `search_text(query, path=".", case_sensitive=true, offset=0, limit=100)` | 单行、非空、字面文本搜索；返回文件路径、行号、文本。`offset` 是跳过的匹配数，`next_offset` 用于继续。 |
-| `read_file(path, offset=1, limit=200, column=0)` | 返回带行号的 `content` 和文件原始字节的 `sha256`。`offset` 从第 1 行起，`column` 从第 0 个字符起。 |
+| `read_file(path, offset=1, limit=200, column=0)` | 返回带行号的 `content`。`offset` 从第 1 行起，`column` 从第 0 个字符起。 |
 
 前三个工具的 `limit` 范围为 1–200，`read_file` 为 1–1000。读取输出最多约 24,000 个文本字符；一行过长时，使用返回的 `next_offset` **和** `next_column` 继续读取同一行。`truncated` 表示还有结果。密钥在分页之前脱敏，字符偏移对应脱敏后的文本。
 
@@ -24,17 +24,16 @@
 | 工具及参数 | 要求 |
 | --- | --- |
 | `create_file(path, content)` | 仅创建不存在的文件，自动创建父目录；不会覆盖已有文件。 |
-| `replace_text(path, old_text, new_text, expected_sha256)` | `old_text` 必须非空并且只匹配一次，包括重叠的匹配。必须提供最近一次读取的原始文件哈希。 |
-| `apply_patch(patch, expected_sha256)` | 使用标准 unified diff；哈希对象的键是补丁涉及的工作区相对路径，值是读取时的哈希。 |
+| `replace_text(path, old_text, new_text)` | `old_text` 必须非空并且只匹配一次，包括重叠的匹配。修改前应先读取相关文件。 |
+| `apply_patch(patch)` | 使用标准 unified diff，严格检查行号和上下文。 |
 
-例如，读取 `src/main.py` 后，将返回的哈希原样用于：
+例如，读取 `src/main.py` 后，可调用精确替换：
 
 ```json
 {
   "path": "src/main.py",
   "old_text": "timeout = 10",
-  "new_text": "timeout = 30",
-  "expected_sha256": "<read_file 返回的 64 位 SHA-256>"
+  "new_text": "timeout = 30"
 }
 ```
 
@@ -48,11 +47,11 @@
 +timeout = 30
 ```
 
-对应参数为 `{"patch": "上述补丁文本", "expected_sha256": {"src/main.py": "读取时的哈希"}}`。补丁要求文件路径、上下文和新旧行号完全匹配，不做模糊匹配；支持多个文件、多个 hunk、插入/移除文本行及文件末尾无换行标记。文件级新增、删除、重命名不在补丁支持范围内；新增文件使用 `create_file`。
+对应参数为 `{"patch": "上述补丁文本"}`。补丁要求文件路径、上下文和新旧行号完全匹配，不做模糊匹配；支持多个文件、多个 hunk、插入/移除文本行及文件末尾无换行标记。文件级新增、删除、重命名不在补丁支持范围内；新增文件使用 `create_file`。
 
-修改前会展示 diff 并调用权限回调。在确认模式下等待批准，在信任模式下仍展示修改。所有补丁先完整解析并检查上下文、哈希，然后在批准后再次检查原文。过期哈希、歧义匹配、非法补丁或拒绝批准均不会写入文件。
+修改前会展示 diff 并调用权限回调。在确认模式下等待批准，在信任模式下仍展示修改。所有补丁先完整解析并检查上下文，再请求批准。歧义匹配、非法补丁或拒绝批准均不会写入文件。文件修改按单会话工作，不记录读取版本，也不在批准后复查文件内容，不保证并发修改安全。
 
-写入先在同目录暂存，再原子替换单个文件；保留原文件权限及已有 LF/CRLF 换行，新增文本沿用相应换行形式。新建文件以原子链接发布，若批准期间别人创建了同名文件则拒绝覆盖。写入结果返回新的哈希和有长度上限的 diff。
+写入先在同目录暂存，再原子替换单个文件；保留原文件权限及已有 LF/CRLF 换行，新增文本沿用相应换行形式。新建文件以原子链接发布，若批准期间别人创建了同名文件则拒绝覆盖。写入结果返回文件路径和有长度上限的 diff。
 
 多文件修改不构成文件系统事务：若操作系统在已替换部分文件后报错，结果明确包含 `partial_write`、`applied_files`，不会自动回滚用户文件。此时应重新读取相关文件再决定后续动作。
 
