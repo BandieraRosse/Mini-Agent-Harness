@@ -2,6 +2,16 @@
 
 验证日期：2026-10-03。实际环境：Windows、Python 3.13.15、Windows PowerShell。
 
+## 0.3.1 分发与安装
+
+新增标准库构建器、HTTP 分发服务和 Linux 安装脚本。真实在线构建从 PyPI 下载两份纯 Python wheel，得到与离线构建完全相同的归档，大小为 641,235 字节（约 626 KiB）。发布包不含密钥、Git、测试、缓存或原生二进制，包含终端依赖及许可证。
+
+在本机 HTTP 服务上通过 Git Bash 实际执行 `curl | sh` 安装到含空格的目录，并运行生成的 `miniagent --version`。使用 `python -S` 启动已安装版本、导入包内 `prompt_toolkit`、`wcwidth` 和 Application 成功，证明运行不依赖 site-packages 或 pip。
+
+自动测试覆盖下载 GET/HEAD 与路由白名单、路径/链接拒绝、发布失败保留 manifest、安装校验、失败时保留旧命令、重复安装、升级、Shell bootstrap 和 PATH 配置。Linux 实机未在本机执行；Shell bootstrap 测试也纳入现有 Ubuntu/Windows CI 测试集。
+
+最终完整测试：**166 项，164 项通过，2 项因 Windows 符号链接权限跳过，无失败**。`compileall`、标准库模式下的服务/安装器 CLI 和 `git diff --check` 通过。
+
 ## 0.3 终端交互升级
 
 本轮根据本地 Codex `6326163` 的相关源码实现默认工具摘要、状态颜色、Ctrl+T 详情、斜杠命令补全和中英混合编辑。项目根目录 `.venv` 已通过 `pip install -e .` 安装当前源码及终端依赖；可直接运行 `.venv/Scripts/python.exe agent.py`。

@@ -27,6 +27,24 @@ miniagent --resume
 miniagent --provider openai --no-save
 ```
 
+## 分发到 Linux 服务器
+
+项目附带只依赖 Python 标准库的分发服务。先在本项目目录运行：
+
+```bash
+python3 scripts/distribute.py --build --bind 0.0.0.0 --port 8765
+```
+
+新服务器只需 Python 3.10+，无需 Git、pip 或虚拟环境。将 `SERVER` 替换为分发机器地址：
+
+```bash
+curl -fsSL http://SERVER:8765/install.sh | sh -s -- http://SERVER:8765 --add-to-path
+export PATH="$HOME/.local/bin:$PATH"
+miniagent -C /path/to/project
+```
+
+发布包约 630 KiB，附带纯 Python 终端依赖。重复安装命令即可升级；支持 wget、指定安装目录、离线构建和后台托管，见 [分发与安装](docs/distribution.md)。
+
 ## 能做什么
 
 - 流式回答，连续多轮工具调用，读取指令和按需获取项目内容。
@@ -44,6 +62,7 @@ miniagent --provider openai --no-save
 
 - [使用指南](docs/usage.md)：安装、密钥、模型、输入、恢复和排错。
 - [终端交互](docs/terminal.md)：摘要/详情、快捷键、中文编辑及 Codex 源码参考。
+- [分发与安装](docs/distribution.md)：标准库分发服务、Linux 一行安装、更新和离线使用。
 - [架构](docs/architecture.md)：上下文、Agent 循环、检查点与权限边界。
 - [工具参考](docs/tools.md)：参数、分页、补丁及执行限制。
 - [验收记录](docs/validation.md)：自动测试与真实 API 验证。
