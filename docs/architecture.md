@@ -1,6 +1,6 @@
 # 架构与开发
 
-MiniAgent 的核心仍然是可读的小型同步循环：上下文 → 模型请求 → 工具调用 → 真实结果 → 下次请求。核心不依赖 SDK、数据库或服务进程。Python 3.10+，可选 `prompt-toolkit` 只负责终端输入。
+MiniAgent 的核心仍然是可读的小型同步循环：上下文 → 模型请求 → 工具调用 → 真实结果 → 下次请求。核心不依赖 SDK、数据库或服务进程。Python 3.10+；终端使用一个直接依赖 `prompt-toolkit`，普通输出仍可使用 `--plain`。
 
 仓库根目录放项目说明、安装配置、`tests/` 和 `docs/`；`miniagent/` 是同一个项目的 Python 源码包，支持 `python -m miniagent` 以及安装后的 `miniagent` 命令。实际被操作的项目由 `-C` 指定，它的 `AGENTS.md` 和 `.miniagent/sessions/` 都属于该目标目录，与程序安装位置无关。
 
@@ -10,6 +10,8 @@ MiniAgent 的核心仍然是可读的小型同步循环：上下文 → 模型�
 | --- | --- |
 | `miniagent/cli.py` | 参数、斜杠命令、生命周期与依赖组装 |
 | `miniagent/ui.py` | 流式文字、工具状态、diff/命令审批、多行输入 |
+| `miniagent/presentation.py` | 同一工具记录的摘要和详情渲染、状态与 diff 颜色 |
+| `miniagent/input.py` | 命令注册表与补全、中英混合输入的字符边界 |
 | `miniagent/config.py` | provider/model/endpoint 校验和隐藏密钥输入 |
 | `miniagent/api.py` | 标准库 HTTP、SSE 组装、重试和协议完整性 |
 | `miniagent/context.py`、`instructions.md` | 运行环境和项目指令 |
@@ -20,6 +22,8 @@ MiniAgent 的核心仍然是可读的小型同步循环：上下文 → 模型�
 | `miniagent/security.py` | 已知密钥脱敏与流式分片处理 |
 
 工具定义与参数校验放在同一个模块，避免旧版 `tools.json` 与实现失配。`agent.py` 保留启动兼容。旧版根目录 `api.py/context.py/tools.py/INSTRUCTIONS.md` 已迁入包；旧 `log/` 不迁移、不覆盖，`log_reader.py` 同时可读旧日志与新会话。
+
+增强终端在主线程接收按键，在单个工作线程执行原来的 Agent 循环。界面从共享记录渲染，Ctrl+T 只改变显示方式；审批通过 Event 等待选择。Ctrl+C 设置取消事件，停止网络读取/命令并等待工作线程结束后再接收下一条任务，避免并行修改。未增加执行中追加任务、多 Agent 或插件等功能。设计来源与边界见 [终端交互](terminal.md)。
 
 ## 一轮任务
 

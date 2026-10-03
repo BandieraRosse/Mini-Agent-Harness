@@ -237,6 +237,9 @@ class ProcessManager:
 
     def run(self, command: str, cwd: str = ".", timeout: float = 120,
             background: bool = False) -> dict:
+        cancel_event = getattr(self, "cancel_event", None)
+        if cancel_event is not None and cancel_event.is_set():
+            raise KeyboardInterrupt()
         if self._closed:
             return self._error("This process manager has been closed.")
         if not isinstance(command, str) or not command.strip():
@@ -262,6 +265,8 @@ class ProcessManager:
             return self._error(f"Command approval failed: {exc}")
         if not approved:
             return self._error("Shell command was not approved.", denied=True)
+        if cancel_event is not None and cancel_event.is_set():
+            raise KeyboardInterrupt()
         if len(self._jobs) >= MAX_JOBS:
             oldest = next((key for key, job in self._jobs.items() if job.done.is_set()), None)
             if oldest is None:
@@ -290,7 +295,11 @@ class ProcessManager:
             job.reader.start()
             job.monitor.start()
             if not background:
-                job.done.wait()
+                while not job.done.wait(0.1):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise KeyboardInterrupt()
+            if cancel_event is not None and cancel_event.is_set():
+                raise KeyboardInterrupt()
             return self._result(job, 0)
         except BaseException as exc:
             if job is not None:

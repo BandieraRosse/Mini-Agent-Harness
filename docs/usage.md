@@ -3,11 +3,12 @@
 ## 启动与模型
 
 ```bash
-# 源码运行，无第三方依赖
+# 安装后运行（建议使用虚拟环境或 pipx）
+python -m pip install -e .
 python -m miniagent -C /path/to/project
 
 # 安装命令及增强输入（建议放在虚拟环境或用 pipx）
-python -m pip install '.[terminal]'
+python -m pip install .
 miniagent -C /path/to/project
 
 # 一次任务；默认逐次确认，自动化需明确授予信任
@@ -38,20 +39,27 @@ miniagent --no-save --plain
 | 命令 | 行为 |
 | --- | --- |
 | `/help` | 帮助和快捷键 |
-| `/new`、`/clear` | 保存旧会话并开始新会话，不改项目文件 |
+| `/clear` | 保存旧会话、清屏并开始新会话，不改项目文件 |
+| `/new` | 保存旧会话并开始新会话，保留终端滚动记录 |
 | `/sessions` | 查看当前项目保存的会话 |
-| `/resume` | 列表；`/resume ID` 或 `/resume latest` 恢复 |
+| `/resume` | 打开会话选择；也支持 `/resume ID` 和 `/resume latest` |
 | `/save` | 保存；`--no-save` 下提示当前不保存 |
 | `/compact` | 立即压缩较早上下文 |
-| `/approval ask` | 每次修改和命令运行前确认 |
-| `/approval trust` | 信任当前项目的本次运行 |
+| `/model` | 从服务返回的模型列表选择；`/model 名称` 直接切换，保留上下文 |
+| `/permissions` | 选择 ask/trust；也支持 `/permissions ask`、`/permissions trust` |
 | `/status` | 模型、目录、权限、消息数和状态 |
 | `/paste` | 普通输入下进入多行模式，`/end` 提交 |
-| `/exit` | 保存并退出 |
+| `/quit`、`/exit` | 保存并退出 |
 
-增强输入安装 `prompt-toolkit` 后自动启用：Enter 提交，Alt+Enter 或 Ctrl+J 换行，支持多行粘贴及内存历史。普通输入可用行末 `\` 续行，或 `/paste`。重定向输入不显示交互提示且默认拒绝需要审批的动作；一次任务自动运行使用 `--trust`。
+安装包默认带上 `prompt-toolkit`：输入 `/` 显示中文命令菜单，方向键选择、Tab 补全、Enter 执行；Alt+Enter 或 Ctrl+J 换行。中文、英文及常见组合字符使用一致的光标与删除规则。原 `/approval` 作为 `/permissions` 的兼容别名保留。
 
-Ctrl+C 中断当前模型生成或命令执行，回到可继续输入的状态；中断会终止本进程的后台任务。Ctrl+D 退出（Windows 普通控制台可用 Ctrl+Z 后 Enter）。新建/切换会话和退出也会清理后台任务。终端保持正常滚动记录，不启用全屏界面；`NO_COLOR=1` 关闭颜色，`--plain` 还关闭增强输入。
+工具默认显示动作摘要和少量输出；Ctrl+T 切换完整工具参数与结果。执行时可实时切换；输入时 Ctrl+T 打开当前会话的记录，Esc 返回，保留未提交草稿。详情视图可用 PgUp/PgDn 滚动，End 跟随最新输出。`--verbose` 初始启用详情，也适用于输出重定向。
+
+普通输入可用行末 `\` 续行，或 `/paste`。重定向输入不显示交互提示且默认拒绝需要审批的动作；一次任务自动运行使用 `--trust`。
+
+Ctrl+C 中断当前模型生成或命令执行，回到可继续输入的状态；中断会终止本进程的后台任务。已建立连接的模型流可主动关闭；DNS、建立连接或 TLS 握手阶段仍可能等待 `--timeout`。Ctrl+D 退出（Windows 普通控制台可用 Ctrl+Z 后 Enter）。新建/切换会话和退出也会清理后台任务。
+
+执行和查看记录时使用可滚动的临时全屏视图，执行结束后把选定摘要/详情写回普通终端记录，再返回输入。审批始终显示完整命令或 diff。`NO_COLOR=1` 关闭颜色，`--plain` 关闭增强交互。完整按键说明见 [终端交互](terminal.md)。
 
 ## 恢复、排错与日志
 

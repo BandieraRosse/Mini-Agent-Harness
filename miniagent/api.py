@@ -5,12 +5,14 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator
 from typing import Any
 
+from . import __version__
 from .config import Config, _clean_key
 
 
@@ -32,6 +34,25 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Even same-origin redirects can turn into cross-origin credential forwarding.
         return None
+
+
+class _HTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, client):
+        super().__init__()
+        self.client = client
+
+    def http_open(self, request):
+        return self.do_open(lambda host, **kw: self.client._connection(http.client.HTTPConnection, host, **kw), request)
+
+
+class _HTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, client):
+        super().__init__()
+        self.client = client
+
+    def https_open(self, request):
+        return self.do_open(lambda host, **kw: self.client._connection(http.client.HTTPSConnection, host, **kw), request,
+                            context=self._context)
 
 
 def _events(response: Any) -> Iterator[str]:
@@ -105,7 +126,89 @@ class ChatClient:
     def __init__(self, config: Config, api_key: str):
         self.config = config
         self._api_key = _clean_key(api_key)
-        self._opener = urllib.request.build_opener(_NoRedirect())
+        self.cancel_event: threading.Event | None = None
+        self._active_socket = None
+        self._opener = urllib.request.build_opener(_NoRedirect(), _HTTPHandler(self), _HTTPSHandler(self))
+
+    def check_cancelled(self) -> None:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise KeyboardInterrupt()
+
+    def cancel(self) -> None:
+        """Interrupt established network reads without waiting on a buffered reader lock.
+
+        DNS, connecting and TLS negotiation still use the configured timeout. The
+        caller must wait for the current operation to stop before reusing this client.
+        """
+        if self.cancel_event is None:
+            self.cancel_event = threading.Event()
+        self.cancel_event.set()
+        active = self._active_socket
+        if active is not None:
+            try:
+                active.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def _connection(self, kind, host, **kwargs):
+        connection = kind(host, **kwargs)
+        connect = connection.connect
+
+        def tracked_connect():
+            self.check_cancelled()
+            connect()
+            self._active_socket = connection.sock
+            self.check_cancelled()
+
+        connection.connect = tracked_connect
+        return connection
+
+    def list_models(self) -> list[str]:
+        """Return validated model IDs advertised by this endpoint; never change models."""
+        self.check_cancelled()
+        endpoint = self.config.endpoint.removesuffix("/chat/completions") + "/models"
+        request = urllib.request.Request(endpoint, headers={
+            "Authorization": f"Bearer {self._api_key}", "Accept": "application/json",
+            "User-Agent": f"MiniAgent/{__version__}"}, method="GET")
+        try:
+            with self._opener.open(request, timeout=self.config.timeout) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+            self.check_cancelled()
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise APIError("API model list exceeded the size limit")
+            try:
+                data = json.loads(raw)
+            except (ValueError, UnicodeError):
+                raise APIError("API model list is not valid JSON") from None
+            if (not isinstance(data, dict) or not isinstance(data.get("data"), list)
+                    or len(data["data"]) > 4096):
+                raise APIError("API returned no valid model list")
+            models = []
+            for item in data["data"]:
+                model = item.get("id") if isinstance(item, dict) else None
+                if (not isinstance(model, str) or not model or len(model) > 256
+                        or any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 for c in model)
+                        or self._api_key in model):
+                    raise APIError("API returned an invalid model ID")
+                if model not in models:
+                    models.append(model)
+            if not models:
+                raise APIError("API returned an empty model list")
+            return models
+        except urllib.error.HTTPError as error:
+            try:
+                detail = self._error_body(error.read(16384))
+            except (OSError, http.client.HTTPException):
+                detail = "Unable to read the provider error"
+            finally:
+                error.close()
+            self.check_cancelled()
+            raise APIError(f"API HTTP {error.code}: {detail}", error.code) from None
+        except (urllib.error.URLError, OSError, http.client.HTTPException):
+            self.check_cancelled()
+            raise APIError("Unable to load models; check the endpoint and network") from None
+        finally:
+            self._active_socket = None
 
     def redact(self, text: str) -> str:
         return text.replace(self._api_key, "[REDACTED]")
@@ -151,25 +254,29 @@ class ChatClient:
         boundaries. A retry is allowed only before any text, reasoning, or call arrives.
         Ctrl+C propagates immediately to the application; partial output is discarded.
         """
+        self.check_cancelled()
         try:
             body = json.dumps(self._payload(messages, tools, stream), ensure_ascii=False).encode("utf-8")
         except (TypeError, ValueError, UnicodeError):
             raise APIError("Messages or tools cannot be encoded as JSON") from None
         for attempt in range(self.config.max_retries + 1):
+            self.check_cancelled()
             progress = {"generated": False}
             request = urllib.request.Request(
                 self.config.endpoint,
                 data=body,
                 headers={"Authorization": f"Bearer {self._api_key}",
                          "Content-Type": "application/json", "Accept": "text/event-stream" if stream else "application/json",
-                         "User-Agent": "MiniAgent/0.2"},
+                         "User-Agent": f"MiniAgent/{__version__}"},
                 method="POST",
             )
             try:
                 with self._opener.open(request, timeout=self.config.timeout) as response:
+                    self.check_cancelled()
                     if stream:
                         return self._stream(response, on_text, progress)
                     raw = response.read(MAX_RESPONSE_BYTES + 1)
+                    self.check_cancelled()
                     if len(raw) > MAX_RESPONSE_BYTES:
                         raise APIError("API response exceeded the size limit")
                     try:
@@ -183,7 +290,9 @@ class ChatClient:
                     visible = message.get("content") or message.get("refusal")
                     if on_text and visible:
                         progress["generated"] = True
+                        self.check_cancelled()
                         on_text(visible)
+                    self.check_cancelled()
                     return result
             except urllib.error.HTTPError as error:
                 try:
@@ -200,9 +309,16 @@ class ChatClient:
                 failure = APIError("API connection failed; check the endpoint and network", retryable=True)
             except APIError as error:
                 failure = error
+            finally:
+                self._active_socket = None
+            self.check_cancelled()
             if progress["generated"] or not failure.retryable or attempt >= self.config.max_retries:
                 raise failure from None
-            time.sleep(min(0.5 * 2 ** attempt, 4.0))
+            delay = min(0.5 * 2 ** attempt, 4.0)
+            if self.cancel_event is not None:
+                self.cancel_event.wait(delay)
+            else:
+                time.sleep(delay)
         raise AssertionError("unreachable")
 
     def _stream(self, response: Any, on_text: Callable[[str], None] | None, progress: dict) -> dict:
@@ -213,6 +329,7 @@ class ChatClient:
         finish = None
         usage: dict = {}
         for event in _events(response):
+            self.check_cancelled()
             if event == "[DONE]":
                 break
             try:
@@ -246,6 +363,7 @@ class ChatClient:
                         progress["generated"] = True
                         target.append(part)
                         if name in ("content", "refusal") and on_text:
+                            self.check_cancelled()
                             on_text(part)
                 updates = delta.get("tool_calls") or []
                 if not isinstance(updates, list):
@@ -271,6 +389,7 @@ class ChatClient:
                             target[key] += value
                 if choice.get("finish_reason") is not None:
                     finish = choice["finish_reason"]
+        self.check_cancelled()
         message: dict = {"role": "assistant", "content": "".join(content) or None}
         if reasoning:
             message["reasoning_content"] = "".join(reasoning)

@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from . import __version__
@@ -40,6 +41,7 @@ def parser():
     result.add_argument("--resume", nargs="?", const="latest", metavar="ID")
     result.add_argument("--list-sessions", action="store_true")
     result.add_argument("--plain", action="store_true", help="Disable colors and enhanced input")
+    result.add_argument("--verbose", action="store_true", help="Show complete tool arguments and results")
     result.add_argument("--version", action="version", version=f"MiniAgent {__version__}")
     return result
 
@@ -60,6 +62,7 @@ def main(argv=None):
         argparser.error("workspace must be an existing directory")
     processes = None
     ui = Terminal(Redactor(), approval="trust" if args.trust else "ask", plain=args.plain)
+    ui.detailed = args.verbose
     try:
         config = Config(provider=args.provider, model=args.model, base_url=args.base_url, timeout=args.timeout)
         session = Session(workspace, config.provider, config.model, save=not args.no_save)
@@ -68,29 +71,37 @@ def main(argv=None):
             return 0
         ui.print(f"MiniAgent {__version__} · {config.provider}/{config.model}", "36")
         ui.notice(f"目录: {workspace} | 权限: {ui.approval} | 保存: {'关闭' if args.no_save else '开启'}")
-        ui.notice("/help 查看命令；Ctrl+C 中断当前工作。")
+        ui.notice("/ 查看命令 · Ctrl+T 工具详情 · Ctrl+C 中断当前工作")
         fixed = fixed_messages(workspace)
         key = load_api_key(config, workspace)
         redact = Redactor(key)
         ui.redact, session.redact = redact, redact
         client = ChatClient(config, key)
+        ui.model = config.model
+        known_models = [config.model]
+        if ui.completer is not None:
+            ui.completer.choices["model"] = lambda: known_models
+            ui.completer.choices["resume"] = lambda: ["latest", *[item["id"] for item in session.list_saved()[:30]]]
         processes = ProcessManager(workspace, ui.approve, redact, secrets=(key,))
         registry = ToolRegistry(workspace, processes, ui.approve, redact)
         if args.resume:
             session.load(args.resume)
+            session.data.update(provider=config.provider, model=config.model)
+            session.save()
+            ui.restore(session.messages)
             ui.notice(f"已恢复 {session.data['id']}；后台任务不跨进程恢复。")
         agent = Agent(client, session, registry, redact.value(fixed), ui, args.max_rounds, args.context_chars)
         task = args.prompt or args.task
         if task:
-            return 0 if agent.run(task) else 1
+            return 0 if ui.run_action(lambda: agent.run(task), client=client, processes=processes) else 1
         while True:
             try:
                 prompt = ui.read()
                 if not prompt:
                     continue
                 if prompt.startswith("/"):
-                    command, _, argument = prompt.partition(" ")
-                    argument = argument.strip()
+                    parts = prompt.split(maxsplit=1)
+                    command, argument = parts[0], parts[1].strip() if len(parts) == 2 else ""
                     if command in {"/exit", "/quit"}:
                         session.save()
                         break
@@ -103,38 +114,88 @@ def main(argv=None):
                         registry = ToolRegistry(workspace, processes, ui.approve, redact)
                         session = Session(workspace, config.provider, config.model, save=not args.no_save, redact=redact)
                         agent.session, agent.tools = session, registry
+                        ui.clear_history(clear_screen=command == "/clear")
                         ui.notice("已新建会话，旧会话可通过 /resume 恢复。" if session.enabled else "已新建内存会话。")
-                    elif command == "/sessions" or command == "/resume" and not argument:
+                    elif command == "/sessions":
                         show_sessions(ui, session)
                     elif command == "/resume":
-                        session.save()
-                        candidate = Session(workspace, config.provider, config.model, save=not args.no_save, redact=redact)
+                        if not argument:
+                            choices = [(item["id"], f"{item['id']}  {item['title']}") for item in session.list_saved()[:30]]
+                            if not choices:
+                                ui.notice("当前项目没有保存的会话。")
+                                continue
+                            argument = ui.choose("恢复会话", choices)
+                            if not argument:
+                                continue
+                        # Resolve 'latest' before saving the current conversation.
+                        candidate = Session(workspace, config.provider, config.model, save=False, redact=redact)
                         candidate.load(argument)
+                        session.save()
+                        candidate.enabled = not args.no_save
+                        candidate.data.update(provider=config.provider, model=config.model)
+                        candidate.save()
                         processes.close()
                         processes = ProcessManager(workspace, ui.approve, redact, secrets=(key,))
                         registry = ToolRegistry(workspace, processes, ui.approve, redact)
                         session = candidate
                         agent.session, agent.tools = session, registry
+                        ui.restore(session.messages)
                         ui.notice(f"已恢复 {session.data['id']}；等待新指令，不自动执行历史操作。")
                     elif command == "/save":
                         session.save()
                         ui.notice(f"已保存 {session.path}" if session.enabled else "当前为 --no-save 模式，会话仅保存在内存。")
                     elif command == "/compact":
-                        if not agent.compact(force=True):
+                        if not ui.run_action(lambda: agent.compact(force=True), client=client, processes=processes):
                             ui.notice("当前没有需要压缩的较早上下文。")
-                    elif command == "/approval" and argument in {"ask", "trust"}:
+                    elif command in {"/permissions", "/approval"}:
+                        if not argument:
+                            argument = ui.choose(f"权限 · 当前 {ui.approval}", [
+                                ("ask", "ask — 每次文件修改和命令执行前确认"),
+                                ("trust", "trust — 信任当前项目会话（Shell 使用当前用户权限）"),
+                            ])
+                            if not argument:
+                                continue
+                        if argument not in {"ask", "trust"}:
+                            raise ValueError("用法：/permissions ask|trust")
                         ui.approval = argument
                         ui.notice(f"权限模式: {argument}")
+                    elif command == "/model":
+                        if not argument:
+                            try:
+                                available = ui.run_action(client.list_models, client=client)
+                                known_models[:] = list(dict.fromkeys([config.model, *available]))
+                            except APIError as error:
+                                ui.notice(f"未能获取模型列表：{error}；仍可输入 /model 模型名称。")
+                            custom = "__miniagent_manual_model__"
+                            options = [(name, name + ("（当前）" if name == config.model else "")) for name in known_models]
+                            if ui.editor is not None:
+                                options.append((custom, "输入其他模型名称…"))
+                            argument = ui.choose(f"模型 · {config.provider}", options)
+                            if argument == custom:
+                                argument = ui.editor.prompt("模型名称 › ").strip()
+                            if not argument:
+                                continue
+                        updated_config = replace(config, model=argument)
+                        updated_client = ChatClient(updated_config, key)
+                        config, client = updated_config, updated_client
+                        agent.client = client
+                        ui.model = config.model
+                        if config.model not in known_models:
+                            known_models.append(config.model)
+                        session.data.update(provider=config.provider, model=config.model)
+                        session.save()
+                        ui.notice(f"已切换模型: {config.provider}/{config.model}；对话上下文保留。")
                     elif command == "/status":
                         ui.print(f"目录: {workspace}\n模型: {config.provider}/{config.model}\n权限: {ui.approval}\n"
                                  f"会话: {session.data['id']}\n状态: {session.data['status']}\n"
                                  f"消息数: {len(session.messages)}\n保存: {session.enabled}")
+                        ui.print(f"本次运行 tokens: {ui.tokens['prompt']} in | {ui.tokens['completion']} out")
                     elif command == "/paste" and ui.editor:
                         ui.notice("增强输入支持 Alt+Enter/Ctrl+J 换行，也可直接粘贴多行。")
                     else:
                         ui.error("未知命令或参数；输入 /help 查看帮助。")
                     continue
-                agent.run(prompt)
+                ui.run_action(lambda: agent.run(prompt), client=client, processes=processes)
             except KeyboardInterrupt:
                 ui.end_stream()
                 processes.close()

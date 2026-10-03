@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mini-agent-harness"
-version = "0.2.0"
+version = "0.3.0"
 description = "A lightweight, inspectable terminal coding agent"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["prompt-toolkit>=3.0.43,<4"]
 
 [project.optional-dependencies]
-terminal = ["prompt-toolkit>=3.0.43,<4"]
+terminal = []
 
 [project.scripts]
 miniagent = "miniagent.cli:main"

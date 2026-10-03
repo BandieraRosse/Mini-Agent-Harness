@@ -12,6 +12,7 @@ class Agent:
         self.max_rounds, self.context_chars = max_rounds, context_chars
 
     def compact(self, force=False):
+        self.ui.check_cancelled()
         active = self.session.active_messages()
         size = len(json.dumps([*self.fixed, *active, self.tools.schemas], ensure_ascii=False))
         if not force and size <= self.context_chars:
@@ -45,10 +46,13 @@ class Agent:
         return True
 
     def run(self, prompt):
+        self.ui.check_cancelled()
+        self.ui.user(prompt)
         self.session.data["status"] = "running"
         self.session.append({"role": "user", "content": prompt})
         try:
             for number in range(1, self.max_rounds + 1):
+                self.ui.check_cancelled()
                 self.compact()
                 self.ui.round(number, self.client.config.model)
                 response = self.client.complete(
@@ -56,6 +60,7 @@ class Agent:
                     on_text=self.ui.stream,
                 )
                 self.ui.end_stream()
+                self.ui.check_cancelled()
                 choice = response["choices"][0]
                 if choice.get("finish_reason") not in ("stop", "tool_calls"):
                     raise APIError("Incomplete model response; no tools executed")
@@ -72,9 +77,10 @@ class Agent:
                     self.session.save()
                     return True
                 for call in calls:
+                    self.ui.check_cancelled()
                     function = call.get("function", {})
                     name = function.get("name", "unknown")
-                    self.ui.tool(name)
+                    self.ui.tool(name, function.get("arguments", ""))
                     try:
                         arguments = json.loads(function.get("arguments", ""))
                         if not isinstance(arguments, dict):

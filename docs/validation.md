@@ -2,6 +2,18 @@
 
 验证日期：2026-10-03。实际环境：Windows、Python 3.13.15、Windows PowerShell。
 
+## 0.3 终端交互升级
+
+本轮根据本地 Codex `6326163` 的相关源码实现默认工具摘要、状态颜色、Ctrl+T 详情、斜杠命令补全和中英混合编辑。项目根目录 `.venv` 已通过 `pip install -e .` 安装当前源码及终端依赖；可直接运行 `.venv/Scripts/python.exe agent.py`。
+
+验证包括实际 prompt-toolkit Application 中的键盘输入：执行中展开以前的长工具参数/结果；按屏幕行滚动查看 14,400 字符的中英混合参数中段；取消后继续输入；审批时切换详情再接受、拒绝或中断；查看记录后保留中英文草稿与光标；选择器方向键、Enter 和 Esc。HTTP 测试验证已建立连接的阻塞流可主动取消，进程测试验证取消事件能终止真实子进程树。
+
+命令测试覆盖 `/model` 切换后保留上下文、`/permissions` 与旧别名、`/resume latest`、`/clear` 与 `/new` 的显示区别及 `/status`。真实 DeepSeek `/models` 返回模型列表成功；真实模型只读任务展示了简洁的 Read 摘要并正确回答。
+
+最终运行 `.venv/Scripts/python.exe -m unittest discover -s tests -q`：**142 项测试，141 项通过，1 项因 Windows 符号链接权限跳过，无失败**。`compileall` 和 `git diff --check` 通过。
+
+下面记录的是 0.2 的基础验收；0.3 在此基础上增加上述交互验证。
+
 ## 自动验证
 
 使用已安装可选终端依赖的项目内虚拟环境运行：

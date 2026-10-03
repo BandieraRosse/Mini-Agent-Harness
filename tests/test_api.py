@@ -35,6 +35,13 @@ def http_server(responses):
         def do_POST(self):
             raw = self.rfile.read(int(self.headers["Content-Length"]))
             requests.append({"path": self.path, "body": json.loads(raw), "headers": dict(self.headers)})
+            self.respond()
+
+        def do_GET(self):
+            requests.append({"path": self.path, "body": None, "headers": dict(self.headers)})
+            self.respond()
+
+        def respond(self):
             spec = responses[min(len(requests) - 1, len(responses) - 1)]
             self.send_response(spec.get("status", 200))
             self.send_header("Content-Type", spec.get("content_type", "text/event-stream"))
@@ -218,6 +225,91 @@ class APITests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 self.client(url).complete([], on_text=lambda text: (_ for _ in ()).throw(KeyboardInterrupt()))
         self.assertEqual(len(requests), 1)
+
+    def test_cancel_stalled_stream_unblocks_worker_and_stops_callbacks(self):
+        prefix = sse(chunk({"content": "first"}), done=False)
+        with http_server([{"prefix": prefix, "delay": 3, "body": answer("late")}]) as (url, requests):
+            client = self.client(url, timeout=10)
+            client.cancel_event = threading.Event()
+            started = threading.Event()
+            fragments, outcomes = [], []
+
+            def on_text(text):
+                fragments.append(text)
+                started.set()
+
+            def request():
+                try:
+                    outcomes.append(client.complete([], on_text=on_text))
+                except BaseException as error:
+                    outcomes.append(error)
+
+            worker = threading.Thread(target=request, daemon=True)
+            worker.start()
+            self.assertTrue(started.wait(2), "The stream should deliver its first fragment")
+            before = time.monotonic()
+            client.cancel()
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive(), "Cancel must interrupt a blocked socket read")
+            self.assertLess(time.monotonic() - before, 2)
+        self.assertEqual(fragments, ["first"])
+        self.assertEqual(len(requests), 1)
+        self.assertIsInstance(outcomes[0], KeyboardInterrupt)
+        self.assertNotIn("test-secret-key", str(outcomes[0]))
+
+    def test_cancelled_request_and_model_list_never_start(self):
+        with http_server([{"body": answer()}]) as (url, requests):
+            client = self.client(url)
+            client.cancel_event = threading.Event()
+            client.cancel()
+            with self.assertRaises(KeyboardInterrupt):
+                client.complete([])
+            with self.assertRaises(KeyboardInterrupt):
+                client.list_models()
+        self.assertEqual(requests, [])
+
+    def test_cancellation_from_callback_rejects_other_buffered_chunks(self):
+        with http_server([{"body": sse(chunk({"content": "first"}), chunk({"content": "second"}, "stop"))}]) as (url, requests):
+            client = self.client(url)
+            client.cancel_event = threading.Event()
+            fragments = []
+
+            def on_text(text):
+                fragments.append(text)
+                client.cancel()
+
+            with self.assertRaises(KeyboardInterrupt):
+                client.complete([], on_text=on_text)
+        self.assertEqual(fragments, ["first"])
+        self.assertEqual(len(requests), 1)
+
+    def test_model_list_uses_matching_endpoint_and_deduplicates(self):
+        body = json.dumps({"data": [{"id": "model-a"}, {"id": "model-b"}, {"id": "model-a"}]}).encode()
+        with http_server([{"body": body}]) as (url, requests):
+            models = self.client(url + "/chat/completions").list_models()
+        self.assertEqual(models, ["model-a", "model-b"])
+        self.assertEqual(requests[0]["path"], "/v1/models")
+        self.assertIsNone(requests[0]["body"])
+        self.assertEqual(requests[0]["headers"]["Authorization"], "Bearer test-secret-key")
+
+    def test_model_list_rejects_missing_invalid_and_secret_ids(self):
+        values = [{}, {"data": []}, {"data": [{"id": "bad\nmodel"}]}, {"data": [{"id": "test-secret-key"}]}]
+        for value in values:
+            with self.subTest(value=value), http_server([{"body": json.dumps(value).encode()}]) as (url, _):
+                with self.assertRaises(APIError) as caught:
+                    self.client(url).list_models()
+                self.assertNotIn("test-secret-key", str(caught.exception))
+
+    def test_model_list_redirects_and_errors_are_safe(self):
+        responses = [{"status": 307, "redirect": "http://127.0.0.1:9/stolen"},
+                     {"status": 401, "body": b'{"error":{"message":"test-secret-key failed"}}'}]
+        for response in responses:
+            with self.subTest(status=response["status"]), http_server([response]) as (url, requests):
+                with self.assertRaises(APIError) as caught:
+                    self.client(url).list_models()
+            self.assertEqual(caught.exception.status, response["status"])
+            self.assertNotIn("test-secret-key", str(caught.exception))
+            self.assertEqual(len(requests), 1)
 
 
 if __name__ == "__main__":

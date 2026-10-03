@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -179,6 +180,39 @@ class ProcessManagerTests(unittest.TestCase):
         self.assertTrue(cancelled["complete"])
         time.sleep(1)
         self.assertFalse((self.workspace / "orphan-marker").exists())
+
+    def test_foreground_cancel_event_interrupts_worker_and_terminates_tree(self):
+        child_source = ("from pathlib import Path;import time;Path('child-ready').touch();"
+                        "time.sleep(1);Path('orphan-marker').touch();time.sleep(10)")
+        parent_source = (f"import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',{child_source!r}]);"
+                         "time.sleep(10)")
+        self.manager.cancel_event = threading.Event()
+        outcomes = []
+
+        def run_foreground():
+            try:
+                outcomes.append(self.manager.run(python_command(parent_source)))
+            except BaseException as error:
+                outcomes.append(error)
+
+        worker = threading.Thread(target=run_foreground, daemon=True)
+        worker.start()
+        deadline = time.monotonic() + 5
+        while not (self.workspace / "child-ready").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue((self.workspace / "child-ready").exists(), "The grandchild must start before cancellation")
+        before = time.monotonic()
+        self.manager.cancel_event.set()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive(), "Cancellation must unblock the foreground worker")
+        self.assertLess(time.monotonic() - before, 2)
+        self.assertIsInstance(outcomes[0], KeyboardInterrupt)
+        job = next(iter(self.manager._jobs.values()))
+        self.assertTrue(job.done.is_set())
+        self.assertEqual(job.reason, "cancelled")
+        self.assertIsNotNone(job.process.poll())
+        time.sleep(1.1)
+        self.assertFalse((self.workspace / "orphan-marker").exists(), "Cancellation must also stop descendants")
 
     def test_close_stops_active_jobs(self):
         started = self.manager.run(python_command("import time;time.sleep(10)"), background=True)

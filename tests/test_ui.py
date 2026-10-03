@@ -57,6 +57,16 @@ class UITests(unittest.TestCase):
         self.assertEqual(terminal_text("\x1b]0;untrusted title\x07safe"), "safe")
         self.assertEqual(terminal_text("\x9b31mtext\x9c"), "31mtext")
 
+    def test_restored_invalid_tool_arguments_can_be_viewed(self):
+        terminal = Terminal(Redactor(), plain=True)
+        terminal.restore([
+            {"role": "assistant", "tool_calls": [{"id": "bad", "function": {"name": "read_file", "arguments": "[]"}}]},
+            {"role": "tool", "tool_call_id": "bad", "content": '{"ok":false,"error":"arguments must be an object"}'},
+        ])
+        self.assertIn("arguments must be an object", "".join(text for _, text in terminal.fragments()))
+        terminal.toggle_details()
+        self.assertIn("arguments", "".join(text for _, text in terminal.fragments()))
+
     @unittest.skipUnless(importlib.util.find_spec("prompt_toolkit"), "Optional terminal extra is not installed")
     def test_enhanced_multiline_interrupt_and_return_to_input(self):
         from prompt_toolkit import PromptSession
