@@ -200,6 +200,21 @@ def main():
     except (OSError, json.JSONDecodeError) as error:
         parser.error(f"cannot read JSON log: {error}")
 
+    if trace.get("version") == 1 and "messages" in trace:
+        if args.round is not None:
+            parser.error("New sessions store messages, not rounds; omit --round")
+        print(color(f"SESSION: {trace.get('id')} | {trace.get('status')}", "cyan"))
+        print(f"WORKSPACE: {trace.get('workspace')}")
+        print(f"MODEL: {trace.get('provider')}/{trace.get('model')}")
+        if trace.get("summary"):
+            show_json("Memory", trace["summary"], "magenta")
+        for index, message in enumerate(trace["messages"], 1):
+            if args.verbose:
+                show_json(f"Message {index}", message, "blue")
+            else:
+                print(f"{index:>4}  {message_summary(message)}")
+        return
+
     rounds = trace.get("rounds", [])
     if args.round is not None:
         rounds = [item for item in rounds if item.get("round") == args.round]
