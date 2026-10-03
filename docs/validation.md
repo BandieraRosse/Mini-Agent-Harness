@@ -2,7 +2,27 @@
 
 [文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
-验证日期：2026-10-03。实际环境：Windows、Python 3.13.15、Windows PowerShell。
+## 公网 IP 证书与真实 GPT API（2026-10-04）
+
+在实际网关服务器通过 Certbot 5.8.0 的 standalone HTTP 验证申请 Let’s Encrypt 公网 IP 证书，标识为 `124.221.221.10`，使用 `shortlived` profile。测试环境申请、正式申请和 `renew --dry-run` 均成功。正式证书已部署到现有两个用户级网关服务，系统默认 CA 校验通过；无需客户端安装此前的私有 CA。旧证书与私钥保存在原 TLS 目录的 `before-letsencrypt/`，保持 0600 权限，不写入仓库。
+
+启用 `miniagent-gateway-cert-renew.timer`，每天两次检查续期，开机恢复运行。部署钩子验证证书链、IP 与私钥匹配，重启后检查两个端口的新证书，失败回滚。首次正式部署钩子运行成功，定时续期服务首次检查成功，定时器为 enabled/active。
+
+实际接口检查确认：`https://124.221.221.10:8444/` 是用量面板，`/v1/models` 返回 HTML；模型 API 应使用 `https://124.221.221.10:8443/`。通过 MiniAgent 的真实模型列表及 `gpt-6-astra` 一次任务验证，模型返回 `OK`，退出码 0。验证使用服务器已有 key，仅在内存中读取，没有输出或保存到测试文件。使用临时工作目录、`--plain --read-only --no-save`，未执行模型工具。
+
+当前代理访问本机公网 API 超时；直连验证成功，测试通过 `NO_PROXY/no_proxy` 排除该 IP。此前下节中的证书错误及未完成真实调用描述是 2026-10-03 的历史状态，已由本次部署与验证解决。
+
+## API key 来源简化（2026-10-03，当前结果）
+
+环境为本机 Linux、Python 3.12.3。移除 ChatGPT OAuth、Responses 适配器与 JWT 可选依赖；仅提供 DeepSeek API 与指定 URL + API key 的 GPT API。交互启动选择来源、密钥保存方式和模型；保留 `/model` 切换与上下文，兼容旧 custom 配置和接口匹配的 key，旧订阅配置回退到 DeepSeek。
+
+完整运行 `python3 -m unittest discover -s tests -v`：215 项，214 通过，1 项 Windows PowerShell 专属测试跳过，无失败，约 15 秒。终端依赖 prompt-toolkit 3.0.53、wcwidth 0.9.1 放在 `/tmp`，以 `PYTHONPATH` 加载；下载文件核对 PyPI SHA-256，没有修改系统 Python。新增本地 HTTP 端到端测试验证连续两次交互启动、根 URL 到 `/v1` 路由、模型列表、选定模型的流式推理、临时密钥不落盘；配置测试验证保存、临时覆盖不修改旧 key、迁移和地址隔离。`compileall`、主命令帮助和 `git diff --check` 通过。
+
+对用户提供的 HTTPS 服务做不带密钥的 HEAD 检查，代理与直连均报 `unable to get local issuer certificate`。未关闭证书校验，未向服务发送用户密钥，未完成该服务的真实模型列表或推理验收；需要先修正服务证书链及访问地址匹配，或配置受信任 CA。
+
+以下均为历史阶段的结果；其中 OAuth/Responses 功能已在当前版本移除。
+
+历史验证日期：2026-10-03。实际环境：Windows、Python 3.13.15、Windows PowerShell。
 
 ## 真实登录后的连接排查
 

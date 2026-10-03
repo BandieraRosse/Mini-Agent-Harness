@@ -47,7 +47,7 @@ python agent.py
 | `/resume [ID\|latest]` | 选择或指定已保存会话；恢复后等待新指令 |
 | `/status` | 查看模型、目录、权限、会话和本次 token 统计 |
 | `/model [名称]` | 获取当前服务的模型列表并选择，或直接指定名称；保留上下文 |
-| `/settings` | 配置 API 来源、模型、登录凭据和账号；查看用户配置目录 |
+| `/settings` | 配置 API 来源、URL、模型和密钥；查看用户配置目录 |
 | `/provider [来源]` | 切换来源并新建会话；停止旧后台任务，清除会话审批规则 |
 | `/permissions [ask\|trust\|read-only\|rules\|reset]` | 切换权限，或查看/清除记住的命令 |
 | `/compact` | 压缩较早上下文，完整记录仍保存在会话中 |

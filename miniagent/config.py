@@ -18,8 +18,6 @@ from urllib.parse import urlsplit
 PROVIDERS = {
     "deepseek": ("https://api.deepseek.com", "deepseek-flash", ".deepseek_api_key"),
     "openai": ("https://api.openai.com/v1", "gpt-6-astra", ".openai_api_key"),
-    "chatgpt": ("https://api.openai.com/v1", "gpt-6-astra", None),
-    "custom": (None, None, ".api_key"),
 }
 INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
@@ -53,15 +51,24 @@ class Preferences:
         try:
             self.data = json.loads(self.path.read_text(encoding="utf-8-sig"))
             if (not isinstance(self.data, dict) or not isinstance(self.data.get("provider", "deepseek"), str)
-                    or self.data.get("provider", "deepseek") not in PROVIDERS
+                    or self.data.get("provider", "deepseek") not in {*PROVIDERS, "custom", "chatgpt"}
                     or not isinstance(self.data.get("profiles", {}), dict)):
                 raise ValueError()
-            for provider, profile in self.data.get("profiles", {}).items():
+            # Upgrade old API profiles; subscription credentials are never reused.
+            profiles = self.data.get("profiles", {})
+            if "custom" in profiles:
+                custom = profiles.pop("custom")
+                if self.data.get("provider") == "custom" or "openai" not in profiles:
+                    profiles["openai"] = custom
+            profiles.pop("chatgpt", None)
+            if self.data.get("provider") == "custom":
+                self.data["provider"] = "openai"
+            elif self.data.get("provider") == "chatgpt":
+                self.data["provider"] = "deepseek"
+            for provider, profile in profiles.items():
                 if provider not in PROVIDERS or not isinstance(profile, dict):
                     raise ValueError()
                 Config(provider=provider, model=profile.get("model"), base_url=profile.get("base_url"))
-            if not isinstance(self.data.get("account", "default"), str):
-                raise ValueError()
         except FileNotFoundError:
             self.data = {}
         except (ValueError, TypeError, UnicodeError):
@@ -73,10 +80,10 @@ class Preferences:
         return Config(provider=provider, model=model or profile.get("model"),
                       base_url=base_url or profile.get("base_url"), timeout=timeout)
 
-    def save(self, config, account="default"):
+    def save(self, config):
         profiles = dict(self.data.get("profiles", {}))
         profiles[config.provider] = {"model": config.model, "base_url": config.base_url}
-        data = {"version": 1, "provider": config.provider, "account": account, "profiles": profiles}
+        data = {"version": 1, "provider": config.provider, "profiles": profiles}
         write_private(self.path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         self.data = data
 
@@ -128,16 +135,14 @@ class Config:
 
     def __post_init__(self) -> None:
         if self.provider not in PROVIDERS:
-            raise ValueError("provider must be deepseek, openai, chatgpt, or custom")
+            raise ValueError("provider must be deepseek or openai")
         default_url, default_model, _ = PROVIDERS[self.provider]
         model = self.model if self.model is not None else default_model
         base_url = self.base_url if self.base_url is not None else default_url
         if not isinstance(model, str) or not model.strip() or any(c.isspace() for c in model):
-            raise ValueError("A model name is required; custom providers need --model")
+            raise ValueError("A model name is required")
         if base_url is None:
-            raise ValueError("Custom providers need --base-url")
-        if self.provider == "chatgpt" and (not isinstance(base_url, str) or base_url.rstrip("/") != PROVIDERS["chatgpt"][0]):
-            raise ValueError("ChatGPT OAuth only supports the official OpenAI endpoint; omit --base-url")
+            raise ValueError("An API base URL is required")
         if (isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float))
                 or not math.isfinite(self.timeout) or self.timeout <= 0):
             raise ValueError("timeout must be a positive finite number")
@@ -151,8 +156,8 @@ class Config:
     @property
     def endpoint(self) -> str:
         base = str(self.base_url)
-        if self.provider == "chatgpt":
-            return base + "/responses"
+        if self.provider == "openai" and not urlsplit(base).path:
+            base += "/v1"
         return base if base.endswith("/chat/completions") else base + "/chat/completions"
 
 
@@ -165,12 +170,13 @@ def _clean_key(value: str) -> str:
 
 def load_api_key(config: Config, workspace: Path) -> str:
     """User keys first; import legacy default-provider files once, never overwrite."""
-    if config.provider == "chatgpt":
-        raise ValueError("ChatGPT uses independent OAuth login, not an API key file")
     filename = PROVIDERS[config.provider][2]
     target = key_path(config)
     paths = [target]
-    if config.provider != "custom" and config.base_url == PROVIDERS[config.provider][0]:
+    if config.provider == "openai":
+        # Old custom keys remain bound to precisely the same endpoint.
+        paths.append(target.with_name(target.name.replace("openai-", "custom-", 1)))
+    if config.base_url == PROVIDERS[config.provider][0]:
         paths.extend(directory / filename for directory in
                      dict.fromkeys((Path(workspace).resolve(), INSTALL_ROOT.resolve())))
     for path in paths:

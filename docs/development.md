@@ -13,8 +13,6 @@ python -m miniagent --help
 
 建议使用虚拟环境。模型和密钥配置见 [使用指南](usage.md)，构建发布包见 [分发与安装](distribution.md)。自动测试使用临时目录和本地 HTTP 服务，不需要真实 API key。
 
-开发 ChatGPT 登录时安装 `python -m pip install -e ".[chatgpt]"`，使真实 JWT 签名校验测试也运行；缺少可选依赖时该组测试会跳过。OAuth 回调和令牌交换测试只使用合成凭据。Windows 凭据测试需要可用的当前用户 DPAPI 配置，受限沙箱可能无法访问；不能因此把生产存储降级成明文。CI 安装可选依赖后运行完整测试。
-
 ## 修改流程
 
 1. 从 [AGENTS.md](../AGENTS.md) 按任务找到相关专题，再阅读实现与已有测试。

@@ -8,10 +8,8 @@ from pathlib import Path
 
 from . import __version__
 from .api import APIError, ChatClient
-from .config import Config, Preferences, load_api_key, user_directory, key_path
+from .config import Preferences, load_api_key, key_path
 from .settings import select_source, credentials, DisconnectedClient
-from .chatgpt_auth import ChatGPTAuth
-from .responses import ResponsesClient
 from .context import fixed_messages
 from .core import Agent
 from .budget import CONTEXT_TOKENS
@@ -30,13 +28,11 @@ def positive_int(value):
 
 
 def parser():
-    result = argparse.ArgumentParser(description="MiniAgent: lightweight terminal coding assistant",
-                                     epilog="ChatGPT authentication: miniagent login | logout | login-status [--account LABEL]")
+    result = argparse.ArgumentParser(description="MiniAgent: lightweight terminal coding assistant")
     result.add_argument("task", nargs="?", help="Run one task and exit")
     result.add_argument("-p", "--prompt", help="Run one task and exit (alternative to positional task)")
     result.add_argument("-C", "--workspace", type=Path, default=Path.cwd())
-    result.add_argument("--provider", choices=["deepseek", "openai", "chatgpt", "custom"])
-    result.add_argument("--account", help="Override the saved MiniAgent ChatGPT account label")
+    result.add_argument("--provider", choices=["deepseek", "openai"])
     result.add_argument("--model", help="Override the provider's model")
     result.add_argument("--base-url", help="Chat Completions base URL, e.g. https://api.openai.com/v1")
     result.add_argument("--timeout", type=positive_int, default=120, help="HTTP timeout in seconds")
@@ -62,7 +58,7 @@ def main(argv=None):
                 stream.reconfigure(encoding="utf-8", errors="replace")
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] in {"login", "logout", "login-status"}:
-        return auth_main(arguments)
+        parser().error("ChatGPT login has been removed; use --provider openai --base-url URL and configure an API key")
     argparser = parser()
     args = argparser.parse_args(arguments)
     if args.task and args.prompt:
@@ -79,7 +75,6 @@ def main(argv=None):
     ui.detailed = args.verbose
     try:
         preferences = Preferences()
-        account = args.account or preferences.data.get("account", "default")
         config = preferences.config(provider=args.provider, model=args.model, base_url=args.base_url, timeout=args.timeout)
         session = Session(workspace, config.provider, config.model, save=not args.no_save)
         if args.list_sessions:
@@ -87,34 +82,29 @@ def main(argv=None):
             return 0
         ui.print(f"MiniAgent {__version__} · {config.provider}/{config.model}", "36")
         ui.notice(f"目录: {workspace} | 权限: {ui.approval} | 保存: {'关闭' if args.no_save else '开启'}")
-        ui.notice("/settings 配置来源和登录 · /model 切换模型 · / 查看命令")
+        ui.notice("/settings 配置 URL 和 API key · /model 切换模型 · / 查看命令")
+        selected = None
         interactive = not (args.task or args.prompt)
-        if interactive and ui.tty and not preferences.path.exists() and args.provider is None:
+        if interactive and ui.tty and args.provider is None and args.model is None and args.base_url is None:
             selected = select_source(ui, preferences, config)
             if selected:
-                preferences.save(selected, account)
+                preferences.save(selected)
                 config = selected
                 session.data.update(provider=config.provider, model=config.model)
         fixed = fixed_messages(workspace)
         redact = Redactor()
-        auth = None
         key = None
         connected = False
         if not (interactive and ui.tty):
-            auth = ChatGPTAuth(account=account, redact=redact) if config.provider == "chatgpt" else None
-            key = None if auth else load_api_key(config, workspace)
-            if auth:
-                auth.access_token()
+            key = load_api_key(config, workspace)
             connected = True
         redact.add(key)
         ui.redact, session.redact = redact, redact
         def make_client(settings):
-            if key is None and auth is None:
+            if key is None:
                 return DisconnectedClient(settings)
-            return ResponsesClient(settings, auth) if settings.provider == "chatgpt" else ChatClient(settings, key)
+            return ChatClient(settings, key)
         client = make_client(config)
-        if auth:
-            ui.notice(f"ChatGPT account: {account} (MiniAgent independent login)")
         ui.model = config.model
         known_models = [config.model]
         if ui.completer is not None:
@@ -132,15 +122,34 @@ def main(argv=None):
                       args.context_tokens)
 
         def connect(edit=False):
-            nonlocal key, auth, client, connected
+            nonlocal key, client, connected
             if connected and not edit:
                 return
-            new_key, new_auth = credentials(ui, config, workspace, account, redact, edit=edit)
-            key, auth = new_key, new_auth
+            new_key = credentials(ui, config, workspace, redact, edit=edit)
+            key = new_key
             client = make_client(config)
             agent.client = client
             agent.fixed = redact.value(fixed)
             connected = True
+
+        if selected:
+            try:
+                connect()
+                try:
+                    available = ui.run_action(client.list_models, client=client)
+                    known_models[:] = list(dict.fromkeys([config.model, *available]))
+                except (APIError, ValueError, OSError) as error:
+                    ui.notice(f"未能获取模型列表：{error}；可手动输入模型名称。")
+                model = choose_model(ui, config, known_models)
+                if model:
+                    config = replace(config, model=model)
+                    preferences.save(config)
+                    client = make_client(config)
+                    agent.client = client
+                    ui.model = config.model
+                    session.data.update(provider=config.provider, model=config.model)
+            except (APIError, ValueError, OSError, EOFError) as error:
+                ui.error(str(error))
 
         task = args.prompt or args.task
         if task:
@@ -224,9 +233,8 @@ def main(argv=None):
                     elif command in {"/settings", "/provider"}:
                         action = "provider" if command == "/provider" else ui.choose(
                             f"设置 · {config.provider}/{config.model}", [
-                                ("provider", "切换 API 来源 / 编辑自定义地址"),
-                                ("model", "切换模型"), ("credentials", "登录 ChatGPT / 设置 API key"),
-                                ("account", "切换 ChatGPT 账号标签"), ("logout", "退出当前 ChatGPT 账号"),
+                                ("provider", "切换 API 来源 / 编辑 GPT 地址"),
+                                ("model", "切换模型"), ("credentials", "设置 API key（临时使用 / 长期保存）"),
                                 ("location", "查看配置和密钥文件位置"),
                             ])
                         if action == "model":
@@ -234,13 +242,13 @@ def main(argv=None):
                         elif action == "provider":
                             updated = select_source(ui, preferences, config, argument if command == "/provider" else "")
                             if updated:
-                                preferences.save(updated, account)
+                                preferences.save(updated)
                                 session.save()
                                 processes.close()
                                 processes = ProcessManager(workspace, ui.approve, redact)
                                 registry = ToolRegistry(workspace, processes, ui.approve, redact, lambda: ui.approval)
                                 ui.approval_rules.clear()
-                                config, key, auth, connected = updated, None, None, False
+                                config, key, connected = updated, None, False
                                 client = make_client(config)
                                 session = Session(workspace, config.provider, config.model, save=not args.no_save, redact=redact)
                                 agent.client, agent.session, agent.tools = client, session, registry
@@ -251,26 +259,10 @@ def main(argv=None):
                                 ui.notice(f"已切换来源: {config.provider}/{config.model}；已新建会话，下次请求时验证凭据。")
                         elif action == "credentials":
                             connect(edit=True)
-                            preferences.save(config, account)
+                            preferences.save(config)
                             ui.notice("凭据已就绪。")
-                        elif action == "account":
-                            label = ui.ask("ChatGPT 账号标签（留空取消）")
-                            if label:
-                                ChatGPTAuth(account=label, redact=redact)
-                                preferences.save(config, label)
-                                account = label
-                                if config.provider == "chatgpt":
-                                    key, auth, connected = None, None, False
-                                ui.notice(f"ChatGPT 账号标签: {account}")
-                        elif action == "logout":
-                            revoked = ChatGPTAuth(account=account, redact=redact).logout()
-                            if config.provider == "chatgpt":
-                                auth, connected = None, False
-                            ui.notice("已退出本地 ChatGPT 登录。" + ("" if revoked else " 请在 ChatGPT 设置中确认断开 MiniAgent。"))
                         elif action == "location":
-                            ui.print(f"用户配置: {preferences.path}\nChatGPT 凭据: {user_directory() / 'chatgpt-auth.dat'}")
-                            if config.provider != "chatgpt":
-                                ui.print(f"当前 API key: {key_path(config)}")
+                            ui.print(f"用户配置: {preferences.path}\n当前 API key: {key_path(config)}")
                         if command != "/model":
                             continue
                     if command == "/model":
@@ -281,17 +273,12 @@ def main(argv=None):
                                 known_models[:] = list(dict.fromkeys([config.model, *available]))
                             except (APIError, ValueError, OSError) as error:
                                 ui.notice(f"未能获取模型列表：{error}；仍可输入 /model 模型名称。")
-                            custom = "__miniagent_manual_model__"
-                            options = [(name, name + ("（当前）" if name == config.model else "")) for name in known_models]
-                            options.append((custom, "输入其他模型名称…"))
-                            argument = ui.choose(f"模型 · {config.provider}", options)
-                            if argument == custom:
-                                argument = ui.ask("模型名称")
+                            argument = choose_model(ui, config, known_models)
                             if not argument:
                                 continue
                         updated_config = replace(config, model=argument)
                         updated_client = make_client(updated_config)
-                        preferences.save(updated_config, account)
+                        preferences.save(updated_config)
                         config, client = updated_config, updated_client
                         agent.client = client
                         ui.model = config.model
@@ -348,29 +335,9 @@ def show_sessions(ui, session):
         ui.print(f"{item['id']}  {item['title']}")
 
 
-def auth_main(arguments):
-    command = arguments[0]
-    cli = argparse.ArgumentParser(prog=f"miniagent {command}", description="Manage MiniAgent's independent ChatGPT login")
-    cli.add_argument("--provider", choices=["chatgpt"], default="chatgpt")
-    cli.add_argument("--account", help="Separate account label; defaults to the saved label")
-    args = cli.parse_args(arguments[1:])
-    try:
-        args.account = args.account or Preferences().data.get("account", "default")
-        auth = ChatGPTAuth(account=args.account)
-        if command == "login":
-            auth.login()
-            print(f"ChatGPT account '{args.account}' signed in. Model access is checked on the first request.")
-        elif command == "login-status":
-            print(auth.status())
-        else:
-            revoked = auth.logout()
-            print(f"ChatGPT account '{args.account}' signed out locally.")
-            if not revoked:
-                print("Remote revocation was not confirmed. Disconnect MiniAgent in ChatGPT Settings.")
-        return 0
-    except KeyboardInterrupt:
-        print("ChatGPT login operation interrupted.", file=sys.stderr)
-        return 130
-    except (ValueError, OSError) as error:
-        print(str(error), file=sys.stderr)
-        return 1
+def choose_model(ui, config, known_models):
+    manual = "__miniagent_manual_model__"
+    options = [(name, name + ("（当前）" if name == config.model else "")) for name in known_models]
+    options.append((manual, "输入其他模型名称…"))
+    choice = ui.choose(f"模型 · {config.provider}", options)
+    return ui.ask("模型名称") if choice == manual else choice

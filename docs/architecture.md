@@ -15,10 +15,8 @@ MiniAgent 面向日常编程，优先保证执行可靠性、响应速度和维�
 | `miniagent/presentation.py` | 同一工具记录的摘要和详情渲染、状态与 diff 颜色 |
 | `miniagent/input.py` | 命令注册表与补全、中英混合输入的字符边界 |
 | `miniagent/config.py` | provider/model/endpoint 校验、用户配置和独立密钥文件 |
-| `miniagent/settings.py` | 交互来源选择、登录和密钥保存选择 |
+| `miniagent/settings.py` | 两种 API 来源选择、GPT URL 和密钥保存选择 |
 | `miniagent/api.py` | 标准库 HTTP、SSE 组装、重试和协议完整性 |
-| `miniagent/responses.py` | ChatGPT Responses 消息、工具和终态适配，复用 HTTP 传输 |
-| `miniagent/chatgpt_auth.py` | MiniAgent 独立 OAuth、账户标签、受保护凭据和串行刷新 |
 | `miniagent/context.py`、`instructions.md` | 运行环境和项目指令 |
 | `miniagent/core.py` | 多轮执行、完成门槛、只读并行调度、上下文压缩 |
 | `miniagent/messages.py`、`budget.py` | 消息阶段与展示、256k 预算和结果分页 |
@@ -45,7 +43,6 @@ MiniAgent 面向日常编程，优先保证执行可靠性、响应速度和维�
 
 消息分为 `commentary` 与 `final_answer`。前者可以只输出进度文字，随后由运行时提示模型继续；后者必须没有工具调用。当前 Chat Completions 适配采用开头的 `[commentary]` / `[final_answer]` 标记，解析后隐藏标记并保存 `phase`；重新发送历史时还原标记，不发送非标准 `phase` 字段。适配层也能读取可选原生 `phase` / `end_turn` 信号，信号冲突则拒绝响应。未标记的纯文本不会自动算作完成；连续 3 次缺少阶段则停为 `stalled`。明确的中间文字可以流式展示，最终候选先缓冲，过完成门槛才展示。
 
-ChatGPT provider 使用 Responses 适配：系统消息转成 developer 输入，工具按 `miniagent` namespace 提交，function call 与 output 通过 call ID 配对。只有 `response.completed` 且响应和可执行输出项均完成时才交付结果；该终态本身不等于 Agent 任务完成，仍需显式 `phase` 或阶段前缀及后台任务完成门槛。当前 Responses 文字在响应终态后交付，不逐字展示。压缩请求也采用流式传输。加密推理项作为 `responses_reasoning` 保存在对应 assistant 消息中并回传；切回 Chat Completions 时不发送该元数据。
 
 必需后台任务默认 `purpose=task`。进程还在运行，或已经结束但终态未由 `run_command` / `poll_command` / `cancel_command` 返回时，会暂缓最终答复并给模型 job ID，要求继续检查。被暂缓的答复也不会在恢复界面显示成完成。显式 `purpose=service` 用于需要持续运行的服务，不阻塞收尾；它仍受超时约束，且新建/切换会话、退出和中断会停止服务。任务结束允许如实报告验证失败，不代表运行时能判断答复中所有事实都正确。
 
@@ -88,6 +85,4 @@ python -m compileall -q miniagent agent.py
 
 测试使用临时项目和本地 HTTP 服务，覆盖 SSE 断流与多工具分片、重试、密钥泄漏、编辑冲突、补丁、后台进程、超时、中断、会话恢复及压缩，不依赖真实 API。CI 在 Ubuntu/Windows、Python 3.10/3.13 上运行。
 
-新增工具时同步增加 schema、分派函数和错误语义，在有副作用的动作前调用审批。Chat Completions 与 ChatGPT Responses 适配器复用工具执行、审批及进程管理。独立 OAuth 登录采用可选 `PyJWT[crypto]` 校验签名，核心 API key 安装方式仍只直接依赖终端库。
-
-ChatGPT 凭据与配置、项目会话分开存储，不读写 Codex 数据。Windows 使用 DPAPI；POSIX 使用 0700/0600 权限。登录/刷新/退出使用跨进程文件锁；刷新后原子保存整组令牌，同时把新旧令牌加入共享脱敏器，子进程环境也检查当前令牌集合。OAuth 请求不跟随重定向；模型端点固定在官方 OpenAI API，避免令牌被自定义地址接收。退出会尝试服务端撤销，失败仍清除本地令牌并提示未确认撤销。第一阶段尚未提供网关、远程临时令牌或免落盘远程授权；使用步骤见 [使用指南](usage.md#chatgpt-订阅登录)。
+新增工具时同步增加 schema、分派函数和错误语义，在有副作用的动作前调用审批。DeepSeek 与指定 URL 的 GPT 来源统一通过 Chat Completions 接入，复用工具执行、审批及进程管理。配置与密钥绑定具体接口；仅本次运行的密钥保存在内存，显式保存才写入用户目录。

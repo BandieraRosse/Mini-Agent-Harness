@@ -30,7 +30,7 @@ class SettingsTests(unittest.TestCase):
         self.assertIsNone(select_source(ui, preferences, Config()))
         ui.ask.side_effect = ["https://user:secret@example.com", "model"]
         with self.assertRaises(ValueError):
-            select_source(ui, preferences, Config(), "custom")
+            select_source(ui, preferences, Config(), "openai")
         self.assertEqual(preferences.path.read_bytes(), before)
 
     def test_key_save_and_memory_choice_never_put_secrets_in_preferences(self):
@@ -39,26 +39,24 @@ class SettingsTests(unittest.TestCase):
         config = Config()
         ui.choose.return_value = "memory"
         with patch("getpass.getpass", return_value="private-key"):
-            key, auth = credentials(ui, config, self.root, "default", redact, edit=True)
+            key = credentials(ui, config, self.root, redact, edit=True)
         self.assertEqual(key, "private-key")
-        self.assertIsNone(auth)
         self.assertFalse(key_path(config).exists())
         self.assertEqual(redact(key), "[REDACTED]")
         ui.choose.return_value = "save"
         with patch("getpass.getpass", return_value="saved-key"):
-            credentials(ui, config, self.root, "default", redact, edit=True)
+            credentials(ui, config, self.root, redact, edit=True)
         Preferences().save(config)
         self.assertEqual(key_path(config).read_text(encoding="utf-8").strip(), "saved-key")
         self.assertNotIn("saved-key", Preferences().path.read_text(encoding="utf-8"))
 
-    def test_login_uses_selected_account_status(self):
-        auth = Mock()
-        auth.status.return_value = "other: signed in\npersonal: signed out"
-        with patch("miniagent.settings.ChatGPTAuth", return_value=auth) as factory:
-            credentials(Mock(), Config(provider="chatgpt"), self.root, "personal", Redactor())
-        self.assertEqual(factory.call_args.kwargs["account"], "personal")
-        auth.login.assert_called_once()
-        auth.access_token.assert_called_once()
+    def test_source_menu_has_only_two_options_and_gpt_accepts_url(self):
+        ui = Mock(tty=True)
+        ui.choose.return_value = "openai"
+        ui.ask.return_value = "https://example.com:8444/"
+        config = select_source(ui, Preferences(), Config())
+        self.assertEqual([value for value, _ in ui.choose.call_args.args[1]], ["deepseek", "openai"])
+        self.assertEqual(config.endpoint, "https://example.com:8444/v1/chat/completions")
 
     def test_plain_menu_accepts_number_and_blank_cancels(self):
         ui = Terminal(Redactor(), plain=True)
@@ -66,6 +64,46 @@ class SettingsTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()), patch("builtins.input", side_effect=["2", ""]):
             self.assertEqual(ui.choose("choose", [("a", "A"), ("b", "B")]), "b")
             self.assertIsNone(ui.choose("choose", [("a", "A")]))
+
+    def test_startup_selects_source_key_and_advertised_model_on_every_run(self):
+        original_init = Terminal.__init__
+
+        def terminal_init(ui, *args, **kwargs):
+            original_init(ui, *args, **kwargs)
+            ui.tty = True
+
+        from tests.test_api import http_server, answer
+        import json
+        catalog = {"body": json.dumps({"data": [{"id": "gateway-model"}]}).encode(),
+                   "content_type": "application/json"}
+        with http_server([catalog, {"body": answer("[final_answer]\nverified")}]) as (url, requests):
+            for run in range(2):
+                requests.clear()
+                output = io.StringIO()
+                with patch.object(Terminal, "__init__", terminal_init), \
+                        patch.object(Terminal, "choose", side_effect=["openai", "memory", "gateway-model"]) as choose, \
+                        patch.object(Terminal, "ask", return_value=url.removesuffix("/v1")), \
+                        patch.object(Terminal, "read", side_effect=["hello", "/quit"]), \
+                        patch("getpass.getpass", return_value="synthetic-startup-key"), \
+                        redirect_stdout(output), redirect_stderr(output):
+                    code = main(["--plain", "--no-save", "-C", str(self.root)])
+                self.assertEqual(code, 0, output.getvalue())
+                self.assertEqual([item[0] for item in choose.call_args_list[0].args[1]], ["deepseek", "openai"])
+                self.assertEqual([r["path"] for r in requests], ["/v1/models", "/v1/chat/completions"])
+                self.assertEqual(requests[1]["body"]["model"], "gateway-model")
+                self.assertEqual(requests[1]["headers"]["Authorization"], "Bearer synthetic-startup-key")
+                self.assertNotIn("synthetic-startup-key", output.getvalue())
+                self.assertFalse(key_path(Preferences().config()).exists())
+
+    def test_temporary_replacement_does_not_overwrite_saved_key(self):
+        from miniagent.config import save_api_key, load_api_key
+        config = Config(provider="openai", base_url="https://example.com/v1")
+        save_api_key(config, "stored-key")
+        ui = Mock()
+        ui.choose.return_value = "memory"
+        with patch("getpass.getpass", return_value="temporary-key"):
+            self.assertEqual(credentials(ui, config, self.root, Redactor(), edit=True), "temporary-key")
+        self.assertEqual(load_api_key(config, self.root), "stored-key")
 
     def test_interactive_start_without_key_switch_and_restart(self):
         original_init = Terminal.__init__
@@ -77,6 +115,7 @@ class SettingsTests(unittest.TestCase):
         with patch.object(Terminal, "__init__", terminal_init), \
                 patch.object(Terminal, "read", side_effect=prompts), \
                 patch.object(Terminal, "choose", return_value=None), \
+                patch.object(Terminal, "ask", return_value=""), \
                 patch("miniagent.cli.load_api_key") as loader, \
                 patch("miniagent.cli.credentials") as connect, \
                 redirect_stdout(output), redirect_stderr(output):
@@ -101,7 +140,8 @@ class SettingsTests(unittest.TestCase):
         output = io.StringIO()
         with patch("miniagent.cli.ChatClient", Client), \
                 patch("miniagent.cli.load_api_key", return_value="old-key"), \
-                patch("miniagent.cli.credentials", return_value=("new-key", None)), \
+                patch("miniagent.cli.credentials", return_value="new-key"), \
+                patch.object(Terminal, "ask", return_value=""), \
                 patch("sys.stdin", io.StringIO("first question\n/provider openai\nsecond question\n/quit\n")), \
                 redirect_stdout(output), redirect_stderr(output):
             code = main(["--plain", "--no-save", "-C", str(self.root)])

@@ -1,8 +1,8 @@
 ﻿# MiniAgent
 
-面向本地和远程 SSH 的轻量终端编程 Agent。Python 3.10+，使用一个直接依赖 `prompt-toolkit` 提供终端交互；支持 DeepSeek、OpenAI、兼容 Chat Completions 的服务，以及可选的 ChatGPT 订阅 OAuth / Responses 接入。
+面向本地和远程 SSH 的轻量终端编程 Agent。Python 3.10+，使用一个直接依赖 `prompt-toolkit` 提供终端交互；仅提供 DeepSeek API 和指定 URL + API key 的 GPT API 两种来源。
 
-定位是方便日常使用的编程工具，以可靠执行、工具调用效率和清晰交互为重点，参考 Codex 逐步完善核心功能。Chat Completions 与 Responses 通过独立适配层接入，工具执行保持统一。
+定位是方便日常使用的编程工具，以可靠执行、工具调用效率和清晰交互为重点，参考 Codex 逐步完善核心功能。两种来源统一使用 Chat Completions 协议，工具执行保持统一。
 
 ## 快速开始
 
@@ -13,7 +13,7 @@ python -m miniagent
 python agent.py
 ```
 
-首次交互启动会显示 API 来源选择；启动后输入 `/settings` 配置来源、模型和登录，或用 `/provider`、`/model` 快速切换。选择自动保存到用户目录，更新程序无需重新配置。API key 隐藏输入，可选择保存到用户目录或仅本次使用；密钥不会写入会话或传入子进程环境。具体路径与旧密钥文件迁移见 [使用指南](docs/usage.md#用户配置与密钥)。
+交互启动会显示来源和模型选择（显式指定连接参数时跳过）；启动后输入 `/settings` 配置来源、URL、模型和密钥，或用 `/provider`、`/model` 快速切换。选择自动保存到用户目录，更新程序无需重新配置。API key 隐藏输入，可选择保存到用户目录或仅本次使用；密钥不会写入会话或传入子进程环境。具体路径与旧密钥文件迁移见 [使用指南](docs/usage.md#用户配置与密钥)。
 
 ```bash
 # 在目标项目中运行
@@ -29,19 +29,13 @@ miniagent --resume
 miniagent --provider openai --no-save
 ```
 
-ChatGPT 订阅使用独立登录，不读取或修改 Codex 凭据。首次使用安装可选依赖并在本地浏览器授权：
+GPT 服务可在启动菜单输入地址，或使用命令：
 
 ```bash
-python -m pip install -e ".[chatgpt]"
-miniagent login --provider chatgpt
-miniagent --provider chatgpt
-miniagent login-status
-miniagent logout --provider chatgpt
+miniagent --provider openai --base-url https://your-server:8444/ --model your-model
 ```
 
-账户必须获得 ChatGPT plan usage 授权；登录成功不等于模型请求已经通过。凭据存储、账户标签与当前限制见 [ChatGPT 登录](docs/usage.md#chatgpt-订阅登录)。当前未实现云网关或临时远程访问令牌。
-
-也可直接启动 `miniagent`，在 `/settings` →「切换 API 来源」选择 ChatGPT，再选择「登录 ChatGPT / 设置 API key」。之后启动会记住该来源与模型。
+隐藏输入 API key 后可选择长期保存或仅本次使用。`/model` 查询模型列表并选择，`/model 模型名称` 直接切换。已移除 ChatGPT 登录、账号标签和 OAuth 依赖。
 
 ## 分发到 Linux 服务器
 

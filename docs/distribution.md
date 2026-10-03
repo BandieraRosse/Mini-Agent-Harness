@@ -4,7 +4,6 @@
 
 分发端和使用端均只要求 **Python 3.10+ 标准安装**。使用端无需 Git、pip、虚拟环境或编译器。发布包附带纯 Python 的 `prompt-toolkit`、`wcwidth` 及其许可证，保留完整终端交互。
 
-上述轻量发布包用于 API key 模式，不附带 ChatGPT 登录所需的可选 `PyJWT[crypto]` 及原生密码库。当前需要 ChatGPT 独立登录时，使用源码/pip 安装 `.[chatgpt]`，见 [使用指南](usage.md#chatgpt-订阅登录)；不要把登录凭据打进发布包。
 
 ## 1. 启动分发服务
 

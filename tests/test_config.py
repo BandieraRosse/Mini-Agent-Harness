@@ -1,3 +1,4 @@
+import json
 import getpass
 import os
 import stat
@@ -41,14 +42,14 @@ class ConfigTests(unittest.TestCase):
 
     def test_preferences_survive_restart_and_cli_overrides_do_not_persist(self):
         saved = Preferences()
-        saved.save(Config(provider="openai", model="saved-model"), "personal")
-        saved.save(Config(model="deep-model"), "personal")
+        saved.save(Config(provider="openai", model="saved-model"))
+        saved.save(Config(model="deep-model"))
         restarted = Preferences()
         self.assertEqual(restarted.config().model, "deep-model")
         self.assertEqual(restarted.config(provider="openai").model, "saved-model")
         self.assertEqual(restarted.config(model="temporary").model, "temporary")
         self.assertEqual(Preferences().config().model, "deep-model")
-        self.assertEqual(restarted.data["account"], "personal")
+        self.assertNotIn("account", restarted.data)
 
     def test_user_key_wins_and_endpoint_changes_cannot_reuse_it(self):
         config = Config()
@@ -71,12 +72,36 @@ class ConfigTests(unittest.TestCase):
             Preferences()
         self.assertNotIn("secret", str(caught.exception))
 
-    def test_custom_requires_endpoint_and_model(self):
-        for kwargs in ({}, {"model": "local-model"}, {"base_url": "http://localhost:9000/v1"}):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                Config(provider="custom", **kwargs)
-        config = Config(provider="custom", model="local-model", base_url="http://localhost:9000/v1")
-        self.assertEqual(config.endpoint, "http://localhost:9000/v1/chat/completions")
+    def test_only_two_providers_and_gpt_root_url(self):
+        from miniagent.config import PROVIDERS
+        self.assertEqual(set(PROVIDERS), {"deepseek", "openai"})
+        for provider in ("chatgpt", "custom"):
+            with self.assertRaises(ValueError):
+                Config(provider=provider)
+        config = Config(provider="openai", base_url="https://example.com:8444/")
+        self.assertEqual(config.endpoint, "https://example.com:8444/v1/chat/completions")
+
+    def test_old_preferences_migrate_without_subscription_credentials(self):
+        self.user_dir.mkdir()
+        path = self.user_dir / "config.json"
+        path.write_text(json.dumps({"provider": "custom", "account": "old", "profiles": {
+            "custom": {"base_url": "https://example.com/v1", "model": "gateway-model"},
+            "chatgpt": {"model": "old"}}}), encoding="utf-8")
+        preferences = Preferences()
+        self.assertEqual(preferences.config().provider, "openai")
+        self.assertEqual(preferences.config().model, "gateway-model")
+        preferences.save(preferences.config())
+        self.assertNotIn("account", json.loads(path.read_text(encoding="utf-8")))
+        path.write_text('{"provider":"chatgpt","profiles":{"chatgpt":{}}}', encoding="utf-8")
+        self.assertEqual(Preferences().config().provider, "deepseek")
+
+    def test_old_custom_key_import_matches_exact_endpoint(self):
+        config = Config(provider="openai", base_url="https://example.com/v1")
+        legacy = key_path(config).with_name(key_path(config).name.replace("openai-", "custom-", 1))
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("legacy-key", encoding="utf-8")
+        self.assertEqual(load_api_key(config, self.user_dir), "legacy-key")
+        self.assertEqual(key_path(config).read_text(encoding="utf-8").strip(), "legacy-key")
 
     def test_insecure_or_credential_urls_rejected_without_echo(self):
         urls = ["http://example.com", "https://user:secret@example.com", "https://example.com?api_key=secret",
@@ -119,7 +144,7 @@ class ConfigTests(unittest.TestCase):
             with patch("miniagent.config.INSTALL_ROOT", install):
                 self.assertEqual(load_api_key(Config(provider="openai"), workspace), "test-openai-key")
                 with patch("getpass.getpass", return_value="test-custom-key") as prompt:
-                    config = Config(provider="custom", model="local", base_url="http://localhost:9000/v1")
+                    config = Config(provider="openai", model="local", base_url="http://localhost:9000/v1")
                     self.assertEqual(load_api_key(config, workspace), "test-custom-key")
                     prompt.assert_called_once()
 
