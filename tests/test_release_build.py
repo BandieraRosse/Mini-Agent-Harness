@@ -44,6 +44,9 @@ class ReleaseBuildTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        cache = patch.object(release, "WHEEL_CACHE", self.root / "cache")
+        cache.start()
+        self.addCleanup(cache.stop)
         self.wheels = self.root / "wheels"
         self.wheels.mkdir()
         for name, version in release.DEPENDENCIES.items():
@@ -121,9 +124,65 @@ class ReleaseBuildTests(unittest.TestCase):
         with patch.object(release, "_fetch", side_effect=[json.dumps({"urls": [item]}).encode(), data]):
             self.assertEqual(release._wheel("wcwidth", "0.9.1", None), data)
         item["digests"]["sha256"] = "0" * 64
+        (release.WHEEL_CACHE / item["filename"]).unlink()
         with patch.object(release, "_fetch", side_effect=[json.dumps({"urls": [item]}).encode(), data]):
             with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
                 release._wheel("wcwidth", "0.9.1", None)
+
+    def test_cached_build_needs_no_network_and_is_identical(self):
+        responses = []
+        for name, version in release.DEPENDENCIES.items():
+            data = wheel_bytes(name, version)
+            item = {"filename": f"{name}-{version}-py3-none-any.whl",
+                    "url": "https://files.pythonhosted.org/test.whl",
+                    "digests": {"sha256": hashlib.sha256(data).hexdigest()}}
+            responses.extend([json.dumps({"urls": [item]}).encode(), data])
+        with patch.object(release, "_fetch", side_effect=responses) as fetch:
+            first = release.build_release(self.root / "first")
+            self.assertEqual(fetch.call_count, 4)
+        with patch.object(release, "_fetch", side_effect=AssertionError("Network must not be used")):
+            self.assertEqual(first, release.build_release(self.root / "second"))
+
+    def test_incomplete_or_damaged_cache_is_downloaded_again(self):
+        name, version = "wcwidth", "0.9.1"
+        data = wheel_bytes(name, version)
+        filename = f"{name}-{version}-py3-none-any.whl"
+        item = {"filename": filename, "url": "https://files.pythonhosted.org/test.whl",
+                "digests": {"sha256": hashlib.sha256(data).hexdigest()}}
+        release.WHEEL_CACHE.mkdir()
+        source = release.WHEEL_CACHE / filename
+        checksum = source.with_suffix(".whl.sha256")
+        for damage in ("missing-checksum", "bad-checksum", "damaged-wheel"):
+            with self.subTest(damage=damage):
+                source.write_bytes(data if damage != "damaged-wheel" else b"incomplete download")
+                checksum.unlink(missing_ok=True)
+                if damage != "missing-checksum":
+                    checksum.write_text("invalid" if damage == "bad-checksum" else item["digests"]["sha256"])
+                with patch.object(release, "_fetch", side_effect=[json.dumps({"urls": [item]}).encode(), data]) as fetch:
+                    self.assertEqual(release._wheel(name, version, None), data)
+                    self.assertEqual(fetch.call_count, 2)
+                with patch.object(release, "_fetch", side_effect=AssertionError("Unexpected download")):
+                    self.assertEqual(release._wheel(name, version, None), data)
+
+    def test_new_dependency_version_cannot_reuse_old_wheel(self):
+        name = "wcwidth"
+        for version in ("0.9.1", "0.9.2"):
+            data = wheel_bytes(name, version)
+            item = {"filename": f"{name}-{version}-py3-none-any.whl",
+                    "url": "https://files.pythonhosted.org/test.whl",
+                    "digests": {"sha256": hashlib.sha256(data).hexdigest()}}
+            with patch.object(release, "_fetch", side_effect=[json.dumps({"urls": [item]}).encode(), data]) as fetch:
+                self.assertEqual(release._wheel(name, version, None), data)
+                self.assertEqual(fetch.call_count, 2)
+
+    def test_nonportable_download_is_not_cached(self):
+        data = wheel_bytes("wcwidth", "0.9.1", pure=False)
+        item = {"filename": "wcwidth-0.9.1-py3-none-any.whl", "url": "https://files.pythonhosted.org/test.whl",
+                "digests": {"sha256": hashlib.sha256(data).hexdigest()}}
+        with patch.object(release, "_fetch", side_effect=[json.dumps({"urls": [item]}).encode(), data]):
+            with self.assertRaises(ValueError):
+                release._wheel("wcwidth", "0.9.1", None)
+        self.assertFalse(release.WHEEL_CACHE.exists())
 
     def test_invalid_build_leaves_previous_manifest_untouched(self):
         output = self.root / "releases"

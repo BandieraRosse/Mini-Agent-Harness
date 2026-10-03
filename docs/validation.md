@@ -2,6 +2,16 @@
 
 [文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
+## 构建依赖缓存（2026-10-04）
+
+构建依赖默认缓存在 `dist/wheels/`，保存经 PyPI SHA-256 与纯 Python wheel 校验的下载文件及摘要。后续构建校验缓存后复用，不再请求 PyPI；缺失、损坏、不完整的缓存或新的依赖版本触发下载。显式 `--wheel-dir` 保持离线输入语义。进度写入 stderr，构建命令的 stdout 仍为 manifest JSON。
+
+本机 Linux 完整回归 219 项：218 通过，1 项 Windows PowerShell 专属测试跳过，无失败。9 项构建测试覆盖无网络缓存复用、确定性产物、缓存损坏恢复、版本隔离及不缓存不合法 wheel。终端测试使用 `/tmp` 中现有依赖。`compileall` 和 `git diff --check` 通过。
+
+另通过真实 PyPI 下载填充当前服务器的依赖缓存，测试产物写入 `/tmp`，未替换现有发布包。第二次构建将网络函数设置为一旦调用就报错，仍成功生成完全相同的 manifest 与发布包摘要，用时 0.384 秒。当前命令无需新增参数，后续 `--build` 可直接复用已填充的缓存。
+
+额外以不可用代理运行 `distribute.py --build`，使用临时发布目录与 loopback 临时端口，缓存构建及服务启动共 0.442 秒，`/manifest.json` 返回 HTTP 200；验证后停止临时服务。
+
 ## 公网 IP 证书与真实 GPT API（2026-10-04）
 
 在实际网关服务器通过 Certbot 5.8.0 的 standalone HTTP 验证申请 Let’s Encrypt 公网 IP 证书，标识为 `124.221.221.10`，使用 `shortlived` profile。测试环境申请、正式申请和 `renew --dry-run` 均成功。正式证书已部署到现有两个用户级网关服务，系统默认 CA 校验通过；无需客户端安装此前的私有 CA。旧证书与私钥保存在原 TLS 目录的 `before-letsencrypt/`，保持 0600 权限，不写入仓库。

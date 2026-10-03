@@ -9,6 +9,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import sys
 import tarfile
 import tempfile
 from urllib.parse import urlsplit
@@ -22,6 +23,25 @@ PYTHON_MIN = "3.10"
 MAX_WHEEL = 8 * 1024 * 1024
 MAX_UNPACKED = 32 * 1024 * 1024
 MAX_FILE = 4 * 1024 * 1024
+WHEEL_CACHE = ROOT / "dist" / "wheels"
+
+
+def _cached_wheel(source):
+    checksum = source.with_suffix(source.suffix + ".sha256")
+    try:
+        if source.is_symlink() or checksum.is_symlink():
+            return None
+        with checksum.open("rb") as stream:
+            expected = stream.read(66).strip()
+        if not re.fullmatch(rb"[0-9a-f]{64}", expected):
+            return None
+        with source.open("rb") as stream:
+            data = stream.read(MAX_WHEEL + 1)
+        if len(data) <= MAX_WHEEL and hashlib.sha256(data).hexdigest().encode() == expected:
+            return data
+    except OSError:
+        pass
+    return None
 
 
 def _fetch(url, limit):
@@ -42,7 +62,14 @@ def _wheel(name, version, wheel_dir):
         source = Path(wheel_dir) / filename
         if source.stat().st_size > MAX_WHEEL:
             raise ValueError(f"Wheel exceeds size limit: {filename}")
+        print(f"Using local dependency: {filename}", file=sys.stderr, flush=True)
         return source.read_bytes()
+    source = WHEEL_CACHE / filename
+    cached = _cached_wheel(source)
+    if cached is not None:
+        print(f"Using cached dependency: {filename}", file=sys.stderr, flush=True)
+        return cached
+    print(f"Downloading dependency: {filename}", file=sys.stderr, flush=True)
     metadata = json.loads(_fetch(f"https://pypi.org/pypi/{name}/{version}/json", 1024 * 1024))
     matches = [item for item in metadata["urls"] if item["filename"] == filename]
     if len(matches) != 1 or matches[0].get("yanked"):
@@ -53,6 +80,13 @@ def _wheel(name, version, wheel_dir):
     data = _fetch(item["url"], MAX_WHEEL)
     if hashlib.sha256(data).hexdigest() != item["digests"]["sha256"]:
         raise ValueError(f"SHA256 mismatch: {filename}")
+    # Store only verified portable wheels. Writing the checksum last makes
+    # interrupted updates a cache miss on the next build.
+    _wheel_files(data, name, version)
+    WHEEL_CACHE.mkdir(parents=True, exist_ok=True)
+    _atomic_write(source, data)
+    _atomic_write(source.with_suffix(source.suffix + ".sha256"),
+                  (item["digests"]["sha256"] + "\n").encode("ascii"))
     return data
 
 
@@ -135,7 +169,8 @@ def _atomic_write(path, data):
 
 
 def build_release(output, wheel_dir=None):
-    """Publish archive then manifest; wheel_dir supplies pinned wheels for offline builds."""
+    """Publish archive then manifest; reuse verified wheels or accept offline inputs."""
+    print("Building MiniAgent release...", file=sys.stderr, flush=True)
     version_text = (ROOT / "miniagent" / "__init__.py").read_text(encoding="utf-8")
     match = re.search(r'^__version__\s*=\s*[\'"]([0-9]+\.[0-9]+\.[0-9]+)[\'"]', version_text, re.M)
     if not match:
@@ -159,6 +194,7 @@ def build_release(output, wheel_dir=None):
     output.mkdir(parents=True, exist_ok=True)
     _atomic_write(output / manifest["filename"], data)
     _atomic_write(output / "manifest.json", (json.dumps(manifest, indent=2) + "\n").encode("utf-8"))
+    print(f"Release ready: {output / manifest['filename']}", file=sys.stderr, flush=True)
     return manifest
 
 

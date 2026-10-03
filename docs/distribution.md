@@ -13,7 +13,7 @@
 python3 scripts/distribute.py --build --bind 0.0.0.0 --port 8765
 ```
 
-第一次构建需要访问 PyPI，下载固定版本的两个纯 Python wheel 并校验 SHA-256；不调用 pip、不安装到系统环境。构建后文件位于 `dist/releases/`。服务默认监听 `127.0.0.1`，上面的 `--bind 0.0.0.0` 用于让其他机器访问。
+第一次构建需要访问 PyPI，下载固定版本的两个纯 Python wheel 并校验 SHA-256；不调用 pip、不安装到系统环境。依赖缓存在项目的 `dist/wheels/`，后续 `--build` 校验本地摘要后直接复用，不再联网。缺失、损坏或不完整的缓存会重新下载；依赖版本变化只下载缺少的新版本。构建时显示下载、缓存命中及完成进度。构建后发布文件位于 `dist/releases/`。服务默认监听 `127.0.0.1`，上面的 `--bind 0.0.0.0` 用于让其他机器访问。
 
 以后启动已有发布包，不需要访问 PyPI：
 
@@ -52,7 +52,7 @@ export PATH="$HOME/.local/bin:$PATH"
 miniagent -C /path/to/project
 ```
 
-启动后使用 `/settings` 选择 API 来源并登录或隐藏输入 API key。来源和模型保存于用户配置目录，key 可选择保存或仅本次使用；目录与安装版本分开，升级后仍然有效，详见 [用户配置与密钥](usage.md#用户配置与密钥)。分发包不带用户配置或密钥，安装器不询问或保存密钥。
+启动后使用 `/settings` 选择 API 来源、填写 GPT 地址或隐藏输入 API key。来源和模型保存于用户配置目录，key 可选择保存或仅本次使用；目录与安装版本分开，升级后仍然有效，详见 [用户配置与密钥](usage.md#用户配置与密钥)。分发包不带用户配置或密钥，安装器不询问或保存密钥。
 
 可指定路径，或在有多个 Python 时指定解释器：
 
@@ -78,7 +78,9 @@ python3 scripts/build_release.py
 
 ## 4. 离线构建或安装
 
-分发机器无外网时，预先提供下面两份 wheel：
+若 `dist/wheels/` 已有完整缓存，可直接按通常方式使用 `--build`，无需指定 `--wheel-dir`。后者用于明确指定外部 wheel 目录，不会联网下载或写入默认缓存。
+
+没有缓存且分发机器无外网时，预先提供下面两份 wheel：
 
 - `prompt_toolkit-3.0.53-py3-none-any.whl`
 - `wcwidth-0.9.1-py3-none-any.whl`
