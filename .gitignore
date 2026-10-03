@@ -1,4 +1,13 @@
 .deepseek_api_key
+.openai_api_key
+.api_key
+.env
+.env.*
+.miniagent/
+.venv/
+build/
+dist/
+*.egg-info/
 __pycache__/
 *.pyc
 log/
