@@ -51,7 +51,7 @@ SCHEMAS = [
              "offset": {"type": "integer", "minimum": 0},
              "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
     _schema("find_files", "Find file paths by glob; default excludes binaries, secrets and generated directories.",
-            {"pattern": _string("Glob against relative path or basename, default '*'"),
+            {"pattern": _string("Glob against workspace-relative path; '**' matches zero or more path components, '*?[]' stay within a component. Slash-free patterns match basenames. Default '*'"),
              "path": _string("Directory to search, default '.'"),
              "offset": {"type": "integer", "minimum": 0},
              "limit": {"type": "integer", "minimum": 1, "maximum": 200}}, []),
@@ -113,6 +113,28 @@ def _bounded_text(value: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + "\n[truncated]"
+
+
+def _glob_matches(relative: str, pattern: str) -> bool:
+    """Match path components without letting ordinary wildcards cross separators."""
+    pattern = pattern.replace("\\", "/")
+    components = relative.split("/")
+    if "/" not in pattern:
+        return fnmatch.fnmatchcase(components[-1], pattern)
+    # Each state is the number of path components consumed so far. Keeping
+    # states explicitly avoids recursive backtracking with repeated '**'.
+    states = {0}
+    for token in pattern.split("/"):
+        if token == ".":
+            continue
+        if token == "**":
+            states = set(range(min(states), len(components) + 1)) if states else set()
+        else:
+            states = {index + 1 for index in states
+                      if index < len(components) and fnmatch.fnmatchcase(components[index], token)}
+        if not states:
+            return False
+    return len(components) in states
 
 
 class ToolRegistry:
@@ -281,7 +303,7 @@ class ToolRegistry:
                 scan_truncated = True
                 break
             relative = self._relative(entry)
-            if not (fnmatch.fnmatchcase(relative, pattern) or fnmatch.fnmatchcase(entry.name, pattern)):
+            if not _glob_matches(relative, pattern):
                 continue
             total += 1
             if total <= offset:

@@ -190,6 +190,10 @@ def show_verbose(round_data):
 
 
 def main():
+    if os.name == "nt":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Read a Mini Agent JSON log.")
     parser.add_argument("log", type=Path, help="Path to log/YYYY...json")
     parser.add_argument("--round", type=int, help="Only display this round")
@@ -200,6 +204,9 @@ def main():
     except (OSError, json.JSONDecodeError) as error:
         parser.error(f"cannot read JSON log: {error}")
 
+    if not isinstance(trace, dict):
+        parser.error("log must contain a JSON object")
+
     if trace.get("version") == 1 and "messages" in trace:
         if args.round is not None:
             parser.error("New sessions store messages, not rounds; omit --round")
@@ -207,7 +214,10 @@ def main():
         print(f"WORKSPACE: {trace.get('workspace')}")
         print(f"MODEL: {trace.get('provider')}/{trace.get('model')}")
         if trace.get("summary"):
-            show_json("Memory", trace["summary"], "magenta")
+            if args.verbose:
+                show_json("Memory", trace["summary"], "magenta")
+            else:
+                print(color("MEMORY: " + preview(trace["summary"], 240), "magenta"))
         for index, message in enumerate(trace["messages"], 1):
             if args.verbose:
                 show_json(f"Message {index}", message, "blue")

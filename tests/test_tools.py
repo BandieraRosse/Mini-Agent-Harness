@@ -247,6 +247,30 @@ class ToolTests(unittest.TestCase):
         self.write("binary", b"hello\0there")
         self.assertFalse(self.call("read_file", path="binary")["ok"])
 
+    def test_find_files_recursive_glob_includes_zero_directory_matches(self):
+        names = {"root.py", "src/main.py", "src/pkg/module.py", "src/pkg/deep/leaf.py", "other/test.py"}
+        for name in names | {"src/readme.txt"}:
+            self.write(name, "content")
+        self.assertEqual(set(self.call("find_files", pattern="**/*.py")["files"]), names)
+        self.assertEqual(set(self.call("find_files", pattern="src/**/*.py")["files"]),
+                         {name for name in names if name.startswith("src/")})
+        self.assertEqual(set(self.call("find_files", pattern="*.py")["files"]), names)
+        self.assertEqual(self.call("find_files", pattern="./*.py")["files"], ["root.py"])
+
+    def test_find_files_ordinary_wildcards_stay_within_path_components(self):
+        for name in ("src/a.py", "src/b.py", "src/long.py", "src/pkg/a.py", "src/pkg/deep/b.py"):
+            self.write(name, "content")
+        expected = {
+            "src/*.py": {"src/a.py", "src/b.py", "src/long.py"},
+            "src/?.py": {"src/a.py", "src/b.py"},
+            "src/[ab].py": {"src/a.py", "src/b.py"},
+            "src/*/?.py": {"src/pkg/a.py"},
+            "src/**/[ab].py": {"src/a.py", "src/b.py", "src/pkg/a.py", "src/pkg/deep/b.py"},
+        }
+        for pattern, paths in expected.items():
+            with self.subTest(pattern=pattern):
+                self.assertEqual(set(self.call("find_files", pattern=pattern)["files"]), paths)
+
     def test_dispatch_rejects_invalid_arguments_and_delegates_commands(self):
         for name, args in [("unknown", {}), ("read_file", []), ("read_file", {}),
                            ("read_file", {"path": "x", "limit": True}),
