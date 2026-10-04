@@ -7,13 +7,12 @@ import re
 import sys
 import threading
 
-from .input import SlashCompleter, help_text, register_completion_bindings, register_editing_bindings
+from .input import SlashCompleter, help_text
 from .presentation import ToolRecord, tool_fragments
 from .security import StreamRedactor
 
 
 HELP = help_text()
-_VIEW = object()
 STYLES = {
     'tool.running': 'ansiyellow', 'tool.success': 'ansigreen bold',
     'tool.error': 'ansired bold', 'tool.muted': 'ansibrightblack',
@@ -69,34 +68,25 @@ class Terminal:
         self._scroll_line = None
         self._fragments_cache = None
         self.completer = None
+        self._ui_thread = None
+        self._ui_ready = threading.Event()
+        self._ui_error = None
+        self._request = None
+        self._busy = False
+        self._cancel = None
+        self._closed = False
         if self.tty and not plain:
             try:
                 from prompt_toolkit import PromptSession
-                from prompt_toolkit.key_binding import KeyBindings
                 from prompt_toolkit.history import InMemoryHistory
                 from prompt_toolkit.styles import Style
-                bindings = KeyBindings()
                 self.completer = SlashCompleter()
-                register_editing_bindings(bindings)
-                register_completion_bindings(bindings, self.completer)
-
-                @bindings.add('escape', 'enter')
-                @bindings.add('c-j')
-                def newline(event):
-                    event.current_buffer.insert_text('\n')
-
-                @bindings.add('c-t')
-                def details(event):
-                    event.app.exit(result=_VIEW)
-
+                # Supplies terminal devices and in-memory history. Its prompt
+                # application is never run; terminal_app owns all rendering.
                 self.editor = PromptSession(
-                    multiline=True, key_bindings=bindings, history=InMemoryHistory(),
-                    completer=self.completer, complete_while_typing=True,
-                    reserve_space_for_menu=9, style=Style.from_dict(STYLES if self.color else {}),
-                    bottom_toolbar=lambda: self.statistics() + '\n / 命令  ·  Ctrl+T 工具详情  ·  Alt+Enter 换行  ·  Ctrl+C 取消',
-                    lexer=self._input_lexer(),
+                    multiline=True, history=InMemoryHistory(),
+                    style=Style.from_dict(STYLES if self.color else {}),
                     show_frame=True,
-                    prompt_continuation=lambda width, line, soft: [('class:input.prompt', '  ' if soft else '· ')],
                 )
                 from prompt_toolkit.layout.controls import BufferControl
                 for window in self.editor.app.layout.find_all_windows():
@@ -150,7 +140,7 @@ class Terminal:
         style = {'2': 'notice', '31': 'error', '36': 'user', '33': 'tool.running'}.get(color, '')
         record = TextRecord(self._safe(text).strip('\n') + '\n\n', style)
         self._append(record)
-        if self._app is None:
+        if self.editor is None:
             self._write([(f'class:{style}', record.text)])
 
     def notice(self, text):
@@ -177,7 +167,7 @@ class Terminal:
             text = self._safe(self.stream_redactor.feed(fragment))
             self.stream_record.text += text
             self._changed()
-        if self._app is None:
+        if self.editor is None:
             self._write([('', text)])
 
     def end_stream(self):
@@ -188,7 +178,7 @@ class Terminal:
             self.stream_record.text += text
             self.streaming, self.stream_redactor, self.stream_record = False, None, None
             self._changed()
-        if self._app is None:
+        if self.editor is None:
             self._write([('', text)])
 
     def tool(self, name, arguments=None):
@@ -201,7 +191,7 @@ class Terminal:
             arguments = {'arguments': arguments} if arguments is not None else {}
         self.current_tool = ToolRecord(self._safe(name), self.redact.value(arguments))
         self._append(self.current_tool)
-        if self._app is None:
+        if self.editor is None:
             self._write(tool_fragments(self.current_tool, detailed=self.detailed))
 
     def result(self, result):
@@ -213,7 +203,7 @@ class Terminal:
             record = self.current_tool
             self.current_tool = None
             self._changed()
-        if self._app is None:
+        if self.editor is None:
             self._write([*tool_fragments(record, detailed=self.detailed), ('', '\n')])
 
     def usage(self, usage):
@@ -236,7 +226,7 @@ class Terminal:
                 f'{label} {counts[key]:,}' if counts[key] is not None else f'{label} 未知'
                 for key, label in labels) + '\n\n'
             self._append(TextRecord(text, 'notice'))
-        if self._app is None:
+        if self.editor is None:
             self._write([('class:notice', text)])
 
     def check_cancelled(self):
@@ -258,13 +248,13 @@ class Terminal:
         if self.approval == 'read-only':
             return False
         if self.approval == 'trust' or rememberable and rule in self.approval_rules:
-            if self._app is None and (self.detailed or self.current_tool is None):
+            if self.editor is None and (self.detailed or self.current_tool is None):
                 self._write([('class:tool.muted', details + '\n')])
             return True
         if not self.tty:
             self.notice('非交互模式未授权修改/命令；自动执行需显式使用 --trust。')
             return False
-        if self._app is None:
+        if self.editor is None:
             self.print(details, '33')
             answer = input('允许执行？[y/N' + ('/a 本会话记住此命令' if rememberable else '') + '] ').strip().lower()
             if answer == 'a' and rememberable:
@@ -312,140 +302,16 @@ class Terminal:
             self.detailed = not self.detailed
             self._changed()
 
-    def _make_app(self, cancel=None, *, viewer=False):
-        from prompt_toolkit import Application
-        from prompt_toolkit.data_structures import Point
-        from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import HSplit, Layout, Window
-        from prompt_toolkit.layout.controls import FormattedTextControl
-        from prompt_toolkit.styles import Style
-        from prompt_toolkit.layout.margins import ScrollbarMargin
-        from prompt_toolkit.formatted_text import fragment_list_to_text
-        from prompt_toolkit.layout.screen import Char
-        from prompt_toolkit.utils import get_cwidth
-
-        wrapped = None
-        rendered_fragments = []
-
-        def content():
-            # Text and cursor must use the same snapshot while a worker streams.
-            nonlocal rendered_fragments
-            rendered_fragments = self.fragments()
-            return rendered_fragments
-
-        def visual_rows():
-            # Keep character offsets as well as logical lines: a tool argument
-            # can occupy many screen rows without containing a single newline.
-            nonlocal wrapped
-            fragments = rendered_fragments
-            width = max(1, body.render_info.window_width if body.render_info else
-                        self.editor.app.output.get_size().columns - 1)
-            if wrapped is None or wrapped[0] is not fragments or wrapped[1] != width:
-                positions = []
-                for row, line in enumerate(fragment_list_to_text(fragments).split('\n')):
-                    positions.append(Point(x=0, y=row))
-                    used = 0
-                    for column, char in enumerate(line):
-                        cells = get_cwidth(Char.display_mappings.get(char, char))
-                        if used and used + cells > width:
-                            positions.append(Point(x=column, y=row))
-                            used = 0
-                        used += cells
-                wrapped = fragments, width, positions
-            return wrapped[2]
-
-        def cursor():
-            rows = visual_rows()
-            if self._scroll_line is None:
-                return rows[-1]
-            return rows[min(len(rows) - 1, max(0, self._scroll_line))]
-
-        def scroll(event, direction):
-            rows = visual_rows()
-            position = len(rows) - 1 if self._scroll_line is None else self._scroll_line
-            page = max(1, body.render_info.window_height - 1) if body.render_info else 12
-            distance = 1 if event.key_sequence[0].key in {'up', 'down'} else page
-            self._scroll_line = min(len(rows) - 1, max(0, position + direction * distance))
-            event.app.invalidate()
-
-        body = Window(FormattedTextControl(content, focusable=True, get_cursor_position=cursor),
-                      wrap_lines=True, right_margins=[ScrollbarMargin(display_arrows=True)])
-        bindings = KeyBindings()
-
-        @bindings.add('c-t')
-        def details(event):
-            self.toggle_details()
-
-        @bindings.add('pageup')
-        @bindings.add('up')
-        def previous(event):
-            scroll(event, -1)
-
-        @bindings.add('pagedown')
-        @bindings.add('down')
-        def following(event):
-            scroll(event, 1)
-
-        @bindings.add('home')
-        def first(event):
-            self._scroll_line = 0
-            event.app.invalidate()
-
-        @bindings.add('end')
-        def last(event):
-            self._scroll_line = None
-            event.app.invalidate()
-
-        @bindings.add('c-c')
-        @bindings.add('escape')
-        def stop(event):
-            if viewer:
-                event.app.exit()
-            elif cancel is not None:
-                cancel()
-
-        @bindings.add('y')
-        @bindings.add('n')
-        @bindings.add('Y')
-        @bindings.add('N')
-        @bindings.add('a')
-        @bindings.add('A')
-        def answer(event):
-            with self._lock:
-                pending = self._approval
-                if pending is not None:
-                    answer = event.data.lower()
-                    if answer == 'a' and pending.get('rule') is None:
-                        return
-                    pending['allowed'] = answer in ('y', 'a') and not self._stopping
-                    if pending['allowed'] and answer == 'a':
-                        self.approval_rules.add(pending['rule'])
-                    self._approval = None
-                    self._changed()
-                    pending['event'].set()
-
-        def footer():
-            mode = '详情' if self.detailed else '摘要'
-            state = '正在停止…' if self._stopping else ('查看记录' if viewer else '执行中')
-            return f' {state} · {mode} · Ctrl+T 切换 · PgUp/PgDn 滚动 · End 跟随 · ' + ('Esc 返回输入' if viewer else 'Ctrl+C 中断')
-
-        return Application(layout=Layout(HSplit([
-            Window(FormattedTextControl(lambda: f' MiniAgent · {self.model}'), height=1, style='class:heading'),
-            body,
-            Window(FormattedTextControl(self.statistics), dont_extend_height=True,
-                   wrap_lines=True, style='class:stats'),
-            Window(FormattedTextControl(footer), height=1, style='class:toolbar'),
-        ]), focused_element=body), key_bindings=bindings, full_screen=True,
-            style=Style.from_dict(STYLES if self.color else {}),
-            input=self.editor.app.input, output=self.editor.app.output)
+    def _make_app(self):
+        from .terminal_app import build_app
+        return build_app(self, STYLES if self.color else {})
 
     def run_action(self, action, *, client=None, processes=None):
         if self.editor is None:
             return action()
-        start = len(self.events)
-        outcome = {}
+        from .terminal_app import ensure_app
         event = threading.Event()
-        self._cancel_event, self._stopping, self._scroll_line = event, False, None
+        self._cancel_event, self._stopping = event, False
         if client is not None:
             client.cancel_event = event
         if processes is not None:
@@ -464,76 +330,65 @@ class Terminal:
                     self._approval = None
                 self._changed()
 
-        app = self._make_app(cancel)
-        self._app = app
-
-        def work():
+        self._busy, self._cancel = True, cancel
+        try:
+            ensure_app(self, STYLES if self.color else {})
+            self._changed()
+            result = action()
+            self.check_cancelled()
+            return result
+        except KeyboardInterrupt:
+            cancel()
+            raise
+        finally:
             try:
-                outcome['result'] = action()
-            except BaseException as error:
-                outcome['error'] = error
+                if event.is_set() and processes is not None:
+                    processes.close()
             finally:
-                try:
-                    if event.is_set() and processes is not None:
-                        processes.close()
-                except BaseException as error:
-                    outcome.setdefault('error', error)
                 with self._lock:
                     if self.current_tool is not None:
                         self.current_tool.result = {'ok': False, 'error': '操作已中断；检查实际状态后再继续。'}
                         self.current_tool = None
-                        self._changed()
-                try:
-                    loop = app.loop
-                    if loop is not None:
-                        loop.call_soon_threadsafe(
-                            lambda: app.exit() if app.is_running and not app.is_done else None)
-                except RuntimeError:
-                    pass  # The terminal may already have closed after an I/O error.
-
-        worker = threading.Thread(target=work, name='miniagent-turn', daemon=True)
-        try:
-            app.run(pre_run=worker.start)
-            worker.join()
-        finally:
-            # An unexpected terminal failure must stop the worker before a new turn can start.
-            if worker.is_alive():
-                cancel()
-                worker.join()
-            self._app, self._cancel_event, self._approval = None, None, None
-            self._stopping = False
-            if client is not None:
-                client.cancel_event = None
-            if processes is not None:
-                processes.cancel_event = None
-            self._write(self.fragments(start))
-        if 'error' in outcome:
-            raise outcome['error']
-        if event.is_set():
-            raise KeyboardInterrupt()
-        return outcome.get('result')
+                    self._cancel_event, self._approval, self._cancel = None, None, None
+                    self._stopping, self._busy = False, False
+                    self._changed()
+                if client is not None:
+                    client.cancel_event = None
+                if processes is not None:
+                    processes.cancel_event = None
 
     def view_history(self):
-        if not self.events:
+        if self.editor is not None:
+            from .terminal_app import request_input
+            request_input(self, STYLES if self.color else {}, 'view')
+
+    def close(self):
+        """Restore the terminal once, after all work has stopped."""
+        if self._closed and self._ui_thread is None:
             return
-        app = self._make_app(viewer=True)
-        self._app = app
-        self._scroll_line = None
-        try:
-            app.run()
-        finally:
-            self._app = None
+        if self._app is not None and self._ui_thread is not None and self._ui_thread.is_alive():
+            def exit_app():
+                if self._app.is_running and not self._app.is_done:
+                    self._app.exit()
+            try:
+                self._app.loop.call_soon_threadsafe(exit_app)
+            except RuntimeError:
+                pass
+            self._ui_thread.join()
+        self._app, self._ui_thread = None, None
+        self._closed = True
+        if self.editor is not None:
+            self._write(self.fragments())
+
 
     def clear_history(self, *, clear_screen=False):
-        self.events.clear()
-        self.current_tool = None
-        self._changed()
-        if clear_screen and self.tty:
-            if self.editor is not None:
-                from prompt_toolkit.shortcuts import clear
-                clear()
-            else:
-                print('\033[2J\033[H', end='', flush=True)
+        with self._lock:
+            self.events.clear()
+            self.current_tool = None
+            self._scroll_line = None
+            self._changed()
+        if clear_screen and self.tty and self.editor is None:
+            print('\033[2J\033[H', end='', flush=True)
 
     def restore(self, messages):
         self.clear_history()
@@ -570,6 +425,8 @@ class Terminal:
 
     def choose(self, title, options):
         """Small no-side-effect picker; values are explicit choices, Escape cancels."""
+        if not options:
+            return None
         if self.editor is None:
             self.print(title)
             for index, (value, label) in enumerate(options, 1):
@@ -582,50 +439,30 @@ class Terminal:
             if answer.isdecimal() and 1 <= int(answer) <= len(options):
                 return options[int(answer) - 1][0]
             raise ValueError('请输入菜单中的编号')
-        from prompt_toolkit import Application
-        from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import HSplit, Layout
-        from prompt_toolkit.styles import Style
-        from prompt_toolkit.widgets import RadioList, Label, Frame
-        radio = RadioList(values=[(value, self._safe(label)) for value, label in options], select_on_focus=True)
-        bindings = KeyBindings()
+        from .terminal_app import request_input
+        return request_input(self, STYLES if self.color else {}, 'choose',
+                             title, options=options, index=0)
 
-        @bindings.add('enter', eager=True)
-        def accept(event):
-            event.app.exit(result=radio.current_value)
-
-        @bindings.add('escape', eager=True)
-        @bindings.add('c-c', eager=True)
-        def cancel(event):
-            event.app.exit(result=None)
-
-        app = Application(layout=Layout(HSplit([
-            Frame(radio, title=self._safe(title)), Label('↑↓ 选择 · Enter 确认 · Esc 取消'),
-        ]), focused_element=radio), key_bindings=bindings, full_screen=False,
-            style=Style.from_dict(STYLES if self.color else {}),
-            input=self.editor.app.input, output=self.editor.app.output)
-        return app.run()
-
-    def ask(self, label):
-        # Separate prompt: configuration values never enter the conversation history.
+    def ask(self, label, *, secret=False):
+        # Configuration values never enter conversation or input history.
         if self.editor:
-            from prompt_toolkit import PromptSession
-            session = PromptSession(input=self.editor.app.input,
-                                    output=self.editor.app.output)
-            return session.prompt(label + ' › ').strip()
+            from .terminal_app import request_input
+            return request_input(self, STYLES if self.color else {}, 'ask', label, secret=secret)
+        if secret:
+            import getpass
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', getpass.GetPassWarning)
+                try:
+                    return getpass.getpass(label + ' › ').strip()
+                except getpass.GetPassWarning:
+                    raise ValueError('Hidden key input requires an interactive terminal') from None
         return input(label + ' › ').strip()
 
     def read(self):
         if self.editor:
-            from prompt_toolkit.document import Document
-            draft = Document('')
-            while True:
-                value = self.editor.prompt([('class:input.prompt', '› ')], default=draft)
-                if value is not _VIEW:
-                    return value.strip()
-                draft = self.editor.default_buffer.document
-                self.toggle_details()
-                self.view_history()
+            from .terminal_app import request_input
+            return request_input(self, STYLES if self.color else {}, 'read')
         line = input('miniagent > ' if self.tty else '')
         if line.strip() == '/paste':
             lines = []

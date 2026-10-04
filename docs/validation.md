@@ -2,6 +2,14 @@
 
 [文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
+## 统一终端界面（2026-10-04）
+
+完成此前会话留下的 `terminal_app.py`：增强模式使用一个持续运行的全屏应用，记录视口不接收焦点，输入、执行、菜单、审批与隐藏凭据输入共用界面。PgUp/PgDn、Ctrl+Home/End 操作记录视口，输入草稿和光标位置不变；执行期间光标隐藏。专用终端线程绘制界面，主线程串行执行 Agent；退出时等待终端线程结束并恢复普通终端。参考本机 Codex 提交 `afb436df8b70bb5bc57b86d9a3e829968988cd21` 的终端与记录视口实现。
+
+本机 Linux 使用仓库 `.venv` 执行 `python -m unittest discover -s tests -v`：193 项，192 项通过，1 项 Windows PowerShell 专属测试跳过，无失败，约 13 秒。11 项实时终端测试通过真实 `prompt-toolkit` 应用和管道输入验证审批、取消后复用同一应用、详情切换、中英混合长行翻页、输入光标的实际屏幕坐标不随翻页改变、执行时隐藏光标、空闲缩放重绘以及密钥掩码和历史隔离。空闲缩放测试复现了默认尺寸轮询在首次采样前漏掉缩放的边界，已改为与最近实际绘制尺寸比较。
+
+另以 Linux PTY 启动实际 CLI（`--provider openai --model terminal-smoke-model --no-save`），执行 `/status`、翻页、详情切换，发送窗口缩放后用 `/quit` 退出；未调用模型 API。退出码 0，捕获的终端控制序列仅有一次进入和一次退出 alternate screen，没有 traceback。`compileall`、文档相对链接及 `git diff --check` 通过。本次没有验证原生 Windows 或用户实际 SSH 客户端中的人工交互体验。
+
 ## 移除本地 HTTP 集成测试（2026-10-04）
 
 按用户要求移除 43 项依赖本地 HTTP 服务的 API、分发、安装和启动集成测试及其服务辅助代码。保留模拟传输错误、安装 PATH 配置和其他离线测试。真实 HTTP/SSE 传输、分发路由与下载安装流程不再由当前自动回归覆盖；下文相关验证属于历史记录。

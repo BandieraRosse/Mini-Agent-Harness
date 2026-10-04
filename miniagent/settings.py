@@ -31,19 +31,11 @@ def select_source(ui, preferences, current, argument=""):
 
 def credentials(ui, config, workspace, redact, *, edit=False):
     if edit:
-        # getpass is deliberately separate from prompt history and visible input.
-        import getpass
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", getpass.GetPassWarning)
-            try:
-                key = getpass.getpass("API key (hidden): ")
-            except getpass.GetPassWarning:
-                raise ValueError("Hidden key input requires an interactive terminal") from None
+        key = ui.ask("API key (hidden)", secret=True)
         from .config import _clean_key
         key = _clean_key(key)
     else:
-        key = load_api_key(config, workspace)
+        key = load_api_key(config, workspace, prompt=lambda label: ui.ask(label, secret=True))
     redact.add(key)
     if edit or not key_path(config).exists():
         choice = ui.choose("保存 API key", [("save", "保存到用户目录，下次自动使用"),

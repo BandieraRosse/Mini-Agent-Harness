@@ -97,7 +97,8 @@ def main(argv=None):
         key = None
         connected = False
         if not (interactive and ui.tty):
-            key = load_api_key(config, workspace)
+            key = load_api_key(config, workspace,
+                               prompt=(lambda label: ui.ask(label, secret=True)) if ui.editor else None)
             connected = True
         redact.add(key)
         ui.redact, session.redact = redact, redact
@@ -330,8 +331,11 @@ def main(argv=None):
         ui.error(str(error))
         return 1
     finally:
-        if processes is not None:
-            processes.close()
+        try:
+            if processes is not None:
+                processes.close()
+        finally:
+            ui.close()
 
 
 def show_sessions(ui, session):

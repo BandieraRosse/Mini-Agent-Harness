@@ -57,6 +57,7 @@ class LiveTerminalTests(unittest.TestCase):
             finally:
                 timer.cancel()
                 unblock()
+                terminal.close()
                 for thread in senders:
                     thread.join(timeout=1)
                 self.assertFalse(any(thread.is_alive() for thread in senders), "keyboard sender did not stop")
@@ -72,7 +73,7 @@ class LiveTerminalTests(unittest.TestCase):
             app = original(*args, **kwargs)
 
             def after_render(sender):
-                content = sender.layout.current_control.create_content(width=100, height=40)
+                content = sender.transcript_window.render_info.ui_content
                 text = "\n".join("".join(part[1] for part in content.get_line(index))
                                  for index in range(content.line_count))
                 callback(sender, text)
@@ -141,10 +142,12 @@ class LiveTerminalTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 env.ui.run_action(action)
             self.assertTrue(cancelled.is_set())
-            self.assertIsNone(env.ui._app)
+            app = env.ui._app
+            self.assertTrue(app.is_running)
             self.assertIsNone(env.ui.current_tool)
             env.pipe.send_text("继续 next\r")
             self.assertEqual(env.ui.read(), "继续 next")
+            self.assertIs(env.ui._app, app)
 
     def test_approval_accept_and_decline_survive_live_detail_toggle(self):
         for answer, expected in [("y", True), ("n", False)]:
@@ -184,12 +187,17 @@ class LiveTerminalTests(unittest.TestCase):
             cursor = len(draft) - 3
             self.observe(env.ui, lambda app, text: shown.set() if "Arguments" in text else None)
 
-            def prompt_rendered(app):
+            def prompt_rendered(app, text):
                 buffer = env.ui.editor.default_buffer
-                if shown.is_set() and env.ui._app is None and not app.is_done:
+                if shown.is_set() and not env.ui.detailed:
                     if buffer.text == draft and buffer.cursor_position == cursor:
                         restored.set()
-            env.ui.editor.app.after_render += prompt_rendered
+            original = env.ui._make_app
+            def make_app():
+                app = original()
+                app.after_render += lambda sender: prompt_rendered(sender, '')
+                return app
+            env.ui._make_app = make_app
 
             def keys():
                 env.pipe.send_text(draft + "\x1b[D" * 3 + "\x14")
@@ -220,7 +228,7 @@ class LiveTerminalTests(unittest.TestCase):
                 env.ui.run_action(action)
             self.assertEqual(performed, [])
             self.assertIsNone(env.ui._approval)
-            self.assertIsNone(env.ui._app)
+            self.assertTrue(env.ui._app.is_running)
 
     def test_picker_arrows_enter_and_escape(self):
         with self.terminal() as env:
@@ -229,6 +237,147 @@ class LiveTerminalTests(unittest.TestCase):
             self.assertEqual(env.ui.choose("选择模型", options), "second")
             env.pipe.send_text("\x1b")
             self.assertIsNone(env.ui.choose("选择会话", options))
+
+    def test_paging_changes_transcript_without_moving_input_cursor(self):
+        with self.terminal() as env:
+            env.ui.notice('\n'.join(f'记录 {i:03d} ' + '中文API' * 30 for i in range(60)))
+            draft = '修复API\nand 文档'
+            position = len(draft) - 2
+            stages = ['draft', 'up', 'home', 'down', 'end']
+            reached = {name: threading.Event() for name in stages}
+            stage, frames = ['draft'], {}
+
+            def rendered(app, text):
+                buffer = env.ui.editor.default_buffer
+                if buffer.text != draft or buffer.cursor_position != position:
+                    return
+                name = stage[0]
+                info = app.transcript_window.render_info
+                screen = app.renderer._last_screen
+                if info is None or screen is None:
+                    return
+                self.assertIs(app.layout.current_window, app.composer_window)
+                self.assertFalse(info.ui_content.show_cursor)
+                self.assertTrue(screen.show_cursor)
+                frames[name] = (buffer.document, info.vertical_scroll,
+                                screen.cursor_positions[app.composer_window])
+                reached[name].set()
+            self.observe(env.ui, rendered)
+
+            def keys():
+                env.pipe.send_text('修复API\x1b\rand 文档' + '\x1b[D' * 2)
+                self.wait(reached['draft'])
+                for name, key in [('up', '\x1b[5~'), ('home', '\x1b[1;5H'),
+                                  ('down', '\x1b[6~'), ('end', '\x1b[1;5F')]:
+                    stage[0] = name
+                    env.pipe.send_text(key)
+                    self.wait(reached[name])
+                env.pipe.send_text('测试\r')
+            env.send(keys)
+            self.assertEqual(env.ui.read(), draft[:position] + '测试' + draft[position:])
+            self.assertLess(frames['up'][1], frames['draft'][1])
+            self.assertEqual(frames['home'][1], 0)
+            self.assertGreater(frames['down'][1], 0)
+            self.assertEqual(frames['end'][1], frames['draft'][1])
+            self.assertEqual(len({frame[2] for frame in frames.values()}), 1)
+
+    def test_execution_hides_cursor_and_reuses_app_without_reprinting_transcript(self):
+        with self.terminal() as env:
+            ready, release = threading.Event(), threading.Event()
+            env.releases.append(release)
+            apps = []
+
+            def rendered(app, text):
+                apps.append(app)
+                if env.ui._busy and 'Run active' in text:
+                    self.assertIs(app.layout.current_window, app.composer_window)
+                    self.assertFalse(app.renderer._last_screen.show_cursor)
+                    ready.set()
+            self.observe(env.ui, rendered)
+
+            def action():
+                env.ui.tool('run_command', {'command': 'active'})
+                self.wait(release)
+                env.ui.result({'ok': True, 'exit_code': 0})
+
+            def keys():
+                self.wait(ready)
+                env.pipe.send_text('\x1b[5~')
+                release.set()
+            env.send(keys)
+            env.ui.run_action(action)
+            app = env.ui._app
+            env.ui.run_action(lambda: env.ui.notice('completed'))
+            self.assertIs(env.ui._app, app)
+            self.assertTrue(app.is_running)
+            self.assertEqual(env.output.getvalue(), '')
+            self.assertTrue(all(item is app for item in apps))
+            env.ui.close()
+            self.assertFalse(app.is_running)
+            self.assertIsNone(env.ui._ui_thread)
+
+    def test_idle_resize_reflows_records_and_keeps_input_focused(self):
+        from prompt_toolkit.data_structures import Size
+        with self.terminal() as env:
+            size = [Size(rows=32, columns=90)]
+            env.ui.editor.app.output.get_size = lambda: size[0]
+            env.ui.notice('中文API' * 150)
+            initial, resized = threading.Event(), threading.Event()
+            draft = '未提交 draft'
+            frames = []
+
+            def rendered(app, text):
+                buffer = env.ui.editor.default_buffer
+                if buffer.text != draft:
+                    return
+                width = app.transcript_window.render_info.window_width
+                self.assertIs(app.layout.current_window, app.composer_window)
+                self.assertEqual(buffer.cursor_position, len(draft))
+                frames.append(width)
+                (resized if width == 50 else initial).set()
+            self.observe(env.ui, rendered)
+
+            def keys():
+                env.pipe.send_text(draft)
+                self.wait(initial)
+                size[0] = Size(rows=24, columns=50)
+                # No keystroke or explicit invalidate: the renderer must notice
+                # a resize while its input is otherwise idle.
+                self.wait(resized)
+                env.pipe.send_text('\r')
+            env.send(keys)
+            self.assertEqual(env.ui.read(), draft)
+            self.assertIn(90, frames)
+            self.assertIn(50, frames)
+
+    def test_secret_input_is_masked_and_never_saved_to_history_or_transcript(self):
+        with self.terminal() as env:
+            secret = 'test-private-key-123'
+            shown = threading.Event()
+            frames = []
+
+            def rendered(app, text):
+                screen = app.renderer._last_screen
+                if screen is None:
+                    return
+                frame = '\n'.join(''.join(cell.char for _, cell in sorted(row.items()))
+                                  for _, row in sorted(screen.data_buffer.items()))
+                frames.append(frame)
+                if env.ui.editor.default_buffer.text == secret and '*' * len(secret) in frame:
+                    shown.set()
+            self.observe(env.ui, rendered)
+
+            def keys():
+                env.pipe.send_text(secret)
+                self.wait(shown)
+                env.pipe.send_text('\r')
+            env.send(keys)
+            self.assertEqual(env.ui.ask('API key', secret=True), secret)
+            self.assertTrue(shown.is_set())
+            self.assertNotIn(secret, '\n'.join(frames))
+            self.assertEqual(list(env.ui.editor.history.get_strings()), [])
+            self.assertEqual(env.ui.events, [])
+            self.assertEqual(env.ui.editor.default_buffer.text, '')
 
     def test_visual_scroll_reaches_wrapped_mixed_line_and_end_follows(self):
         with self.terminal() as env:
@@ -241,7 +390,7 @@ class LiveTerminalTests(unittest.TestCase):
             stage, frames = ["initial"], {}
 
             def rendered(app, text):
-                info = app.layout.current_window.render_info
+                info = app.transcript_window.render_info
                 screen = app.renderer._last_screen
                 if info is None or screen is None:
                     return
@@ -258,9 +407,9 @@ class LiveTerminalTests(unittest.TestCase):
 
             def keys():
                 self.wait(reached["initial"])
-                for name, key in [("home", "\x1b[H"), ("middle", "\x1b[6~" * 2),
-                                  ("down", "\x1b[B"), ("up", "\x1b[A"),
-                                  ("pageback", "\x1b[5~"), ("end", "\x1b[F")]:
+                for name, key in [("home", "\x1b[1;5H"), ("middle", "\x1b[6~" * 2),
+                                  ("down", "\x1b[6~"), ("up", "\x1b[5~"),
+                                  ("pageback", "\x1b[5~"), ("end", "\x1b[1;5F")]:
                     stage[0] = name
                     env.pipe.send_text(key)
                     self.wait(reached[name])

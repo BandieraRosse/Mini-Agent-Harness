@@ -155,6 +155,7 @@ class UITests(unittest.TestCase):
             with patch("sys.stdin.isatty", return_value=True), patch(
                     "prompt_toolkit.PromptSession", side_effect=factory):
                 terminal = Terminal(Redactor())
+            self.addCleanup(terminal.close)
             preferences = Mock()
             preferences.config.return_value = Config(provider="openai")
             ask = terminal.ask
@@ -192,6 +193,7 @@ class UITests(unittest.TestCase):
 
             with patch("sys.stdin.isatty", return_value=True), patch("prompt_toolkit.PromptSession", side_effect=factory):
                 terminal = Terminal(Redactor())
+            self.addCleanup(terminal.close)
             self.assertTrue(terminal.editor.show_frame)
             self.assertEqual(terminal.editor.app.layout.current_window.style, 'class:input')
             pipe.send_text("first\x1b\rsecond\r")

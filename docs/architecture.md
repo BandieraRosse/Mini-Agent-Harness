@@ -11,7 +11,8 @@ MiniAgent 面向日常编程，优先保证执行可靠性、响应速度和维�
 | 文件 | 责任 |
 | --- | --- |
 | `miniagent/cli.py` | 参数、斜杠命令、生命周期与依赖组装 |
-| `miniagent/ui.py` | 流式文字、工具状态、diff/命令审批、多行输入 |
+| `miniagent/ui.py` | 终端记录、流式文字、工具状态、审批及界面生命周期 |
+| `miniagent/terminal_app.py` | 持续运行的统一界面、输入框、菜单与记录视口滚动 |
 | `miniagent/presentation.py` | 同一工具记录的摘要和详情渲染、状态与 diff 颜色 |
 | `miniagent/input.py` | 命令注册表与补全、中英混合输入的字符边界 |
 | `miniagent/config.py` | provider/model/endpoint 校验、用户配置和独立密钥文件 |
@@ -28,7 +29,7 @@ MiniAgent 面向日常编程，优先保证执行可靠性、响应速度和维�
 
 工具定义与参数校验放在同一个模块，避免旧版 `tools.json` 与实现失配。`agent.py` 保留启动兼容。旧版根目录 `api.py/context.py/tools.py/INSTRUCTIONS.md` 已迁入包；旧 `log/` 不迁移、不覆盖，当前保存 JSON 检查点与 JSONL 会话增量。
 
-增强终端在主线程接收按键，在单个工作线程执行原来的 Agent 循环。界面从共享记录渲染，Ctrl+T 只改变显示方式；审批通过 Event 等待选择。Ctrl+C 设置取消事件，停止网络读取/命令并等待工作线程结束后再接收下一条任务，避免并行修改。未增加执行中追加任务、多 Agent 或插件等功能。设计来源与边界见 [终端交互](terminal.md)。
+增强终端由专用线程运行一个持续存在的全屏应用，主线程保持同步 Agent 循环。输入、执行、审批、设置与菜单复用同一个界面，记录区不接收焦点，光标只在正在编辑的输入框显示。PgUp/PgDn 操作记录视口，与输入光标和草稿分开；Ctrl+T 只改变显示方式。输入和审批通过 Event 返回主线程，Ctrl+C 设置取消事件并中断网络读取或命令，当前操作结束后才接受下一条任务。界面关闭时唤醒待输入请求并取消当前任务；CLI 最终停止进程、退出界面并等待终端线程结束。未增加执行中追加任务、多 Agent 或插件等功能。设计来源与边界见 [终端交互](terminal.md)。
 
 ## 一轮任务
 
@@ -70,7 +71,7 @@ POSIX 下检查点和新建日志文件均仅当前用户可读写。密钥不�
 
 ## 权限边界
 
-默认逐次确认 Shell 命令和文件 diff。`--trust` 或 `/permissions trust` 信任当前运行。`--read-only` 或 `/permissions read-only` 仅暴露读取/轮询工具，并在运行时拒绝未暴露的修改或命令调用；已有后台进程不会因模式切换自动停止，可用 Ctrl+C 停止。审批时按 A 可记住完整命令与工作目录，参数或目录变化需重新批准；含脱敏或显示清理的命令不可记忆。`/permissions rules` 查看、`reset` 清除；规则仅驻留内存，新建/恢复会话时清除。
+默认使用 `trust` 模式，信任当前运行的 Shell 命令和文件修改，无需逐次批准，仍显示命令或 diff 预览；`--trust` 或 `/permissions trust` 可显式选择该模式。`--ask` 或 `/permissions ask` 启用逐次确认；非交互终端无法审批时拒绝操作。`--read-only` 或 `/permissions read-only` 仅暴露读取/轮询工具，并在运行时拒绝未暴露的修改或命令调用；已有后台进程不会因模式切换自动停止，可用 Ctrl+C 停止。审批时按 A 可记住完整命令与工作目录，参数或目录变化需重新批准；含脱敏或显示清理的命令不可记忆。`/permissions rules` 查看、`reset` 清除；规则仅驻留内存，新建/恢复会话时清除。
 
 文件工具禁止越出工作目录、访问密钥及内部数据；Shell 以当前用户身份执行，**没有安全沙箱**。当前也不支持交互式子进程 stdin/PTY；这两项不在本阶段实现范围。
 
@@ -83,6 +84,6 @@ python -m unittest discover -s tests -v
 python -m compileall -q miniagent agent.py
 ```
 
-测试使用临时项目和本地 HTTP 服务，覆盖 SSE 断流与多工具分片、重试、密钥泄漏、编辑冲突、补丁、后台进程、超时、中断、会话恢复及压缩，不依赖真实 API。CI 在 Ubuntu/Windows、Python 3.10/3.13 上运行。
+当前自动测试使用临时项目和模拟响应，不启动本地 HTTP 服务，也不依赖真实 API key。覆盖模拟 SSE 断流与重试、密钥脱敏、编辑冲突、补丁、后台进程、超时、中断、会话恢复、压缩及终端交互；真实 HTTP/SSE 传输、分发服务及下载安装流程需手动验证，不能由离线回归通过推断其正常。既有真实验证属于对应版本的历史记录，见 [验收记录](validation.md)。CI 配置覆盖 Ubuntu/Windows、Python 3.10/3.13。
 
 新增工具时同步增加 schema、分派函数和错误语义，在有副作用的动作前调用审批。DeepSeek 与指定 URL 的 GPT 来源统一通过 Chat Completions 接入，复用工具执行、审批及进程管理。配置与密钥绑定具体接口；仅本次运行的密钥保存在内存，显式保存才写入用户目录。

@@ -171,7 +171,7 @@ def _clean_key(value: str) -> str:
     return key
 
 
-def load_api_key(config: Config, workspace: Path) -> str:
+def load_api_key(config: Config, workspace: Path, *, prompt=None) -> str:
     """User keys first; import legacy default-provider files once, never overwrite."""
     filename = PROVIDERS[config.provider][2]
     target = key_path(config)
@@ -197,6 +197,8 @@ def load_api_key(config: Config, workspace: Path) -> str:
             save_api_key(config, key)
         return key
     try:
+        if prompt is not None:
+            return _clean_key(prompt(f"{config.provider} API key (hidden)"))
         # getpass otherwise falls back to visible stdin when no TTY is available.
         with warnings.catch_warnings():
             warnings.simplefilter("error", getpass.GetPassWarning)

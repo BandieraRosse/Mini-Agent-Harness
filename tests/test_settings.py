@@ -38,14 +38,15 @@ class SettingsTests(unittest.TestCase):
         redact = Redactor()
         config = Config()
         ui.choose.return_value = "memory"
-        with patch("getpass.getpass", return_value="private-key"):
-            key = credentials(ui, config, self.root, redact, edit=True)
+        ui.ask.return_value = "private-key"
+        key = credentials(ui, config, self.root, redact, edit=True)
+        ui.ask.assert_called_once_with('API key (hidden)', secret=True)
         self.assertEqual(key, "private-key")
         self.assertFalse(key_path(config).exists())
         self.assertEqual(redact(key), "[REDACTED]")
         ui.choose.return_value = "save"
-        with patch("getpass.getpass", return_value="saved-key"):
-            credentials(ui, config, self.root, redact, edit=True)
+        ui.ask.return_value = "saved-key"
+        credentials(ui, config, self.root, redact, edit=True)
         Preferences().save(config)
         self.assertEqual(key_path(config).read_text(encoding="utf-8").strip(), "saved-key")
         self.assertNotIn("saved-key", Preferences().path.read_text(encoding="utf-8"))
@@ -71,8 +72,8 @@ class SettingsTests(unittest.TestCase):
         save_api_key(config, "stored-key")
         ui = Mock()
         ui.choose.return_value = "memory"
-        with patch("getpass.getpass", return_value="temporary-key"):
-            self.assertEqual(credentials(ui, config, self.root, Redactor(), edit=True), "temporary-key")
+        ui.ask.return_value = "temporary-key"
+        self.assertEqual(credentials(ui, config, self.root, Redactor(), edit=True), "temporary-key")
         self.assertEqual(load_api_key(config, self.root), "stored-key")
 
     def test_interactive_start_without_key_switch_and_restart(self):

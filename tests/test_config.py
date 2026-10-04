@@ -5,12 +5,24 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from miniagent.config import Config, Preferences, key_path, load_api_key, save_api_key
 
 
 class ConfigTests(unittest.TestCase):
+    def test_hidden_prompt_callback_is_used_only_when_no_saved_key_exists(self):
+        config = Config(provider='openai', base_url='https://example.com/v1')
+        prompt = Mock(return_value='private-key')
+        with patch('getpass.getpass') as fallback:
+            self.assertEqual(load_api_key(config, self.user_dir, prompt=prompt), 'private-key')
+            fallback.assert_not_called()
+        prompt.assert_called_once_with('openai API key (hidden)')
+        save_api_key(config, 'stored-key')
+        prompt.reset_mock()
+        self.assertEqual(load_api_key(config, self.user_dir, prompt=prompt), 'stored-key')
+        prompt.assert_not_called()
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

@@ -32,6 +32,10 @@ class APIError(RuntimeError):
         self.retryable = retryable
 
 
+class _StreamEnded(APIError):
+    """EOF without a terminal event; contains protocol metadata only."""
+
+
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Even same-origin redirects can turn into cross-origin credential forwarding.
@@ -81,10 +85,27 @@ def _events(response: Any, terminal: str = "[DONE]") -> Iterator[str]:
     """Parse complete SSE events, including comments and multiline data fields."""
     data: list[str] = []
     event_bytes = total_bytes = 0
+    events = 0
     while True:
         raw = response.readline(MAX_EVENT_BYTES + 1)
         if not raw:
-            raise APIError(f"API stream ended before {terminal}; no tool calls were accepted")
+            # Some compatible gateways close immediately after the terminal
+            # line. Accept only the explicit marker, never an unfinished chunk.
+            pending = "\n".join(data)
+            if pending == terminal:
+                yield pending
+                return
+            if pending:
+                try:
+                    parsed = json.loads(pending)
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, dict) and parsed.get("error"):
+                    yield pending
+            raise _StreamEnded(
+                f"API stream ended before {terminal}; no tool calls were accepted "
+                f"(SSE events={events}, pending event={'yes' if data else 'no'})",
+                retryable=True)
         total_bytes += len(raw)
         event_bytes += len(raw)
         if event_bytes > MAX_EVENT_BYTES or total_bytes > MAX_RESPONSE_BYTES:
@@ -95,6 +116,7 @@ def _events(response: Any, terminal: str = "[DONE]") -> Iterator[str]:
             raise APIError("API stream contains invalid UTF-8") from None
         if not line:
             if data:
+                events += 1
                 yield "\n".join(data)
                 data = []
             event_bytes = 0
@@ -154,7 +176,11 @@ class ChatClient:
         self._api_key = _clean_key(api_key)
         self.cancel_event: threading.Event | None = None
         self._active_socket = None
-        self._opener = urllib.request.build_opener(_NoRedirect(), _HTTPHandler(self), _HTTPSHandler(self))
+        self._socket_lock = threading.Lock()
+        # An explicit empty handler disables urllib's environment/system proxy
+        # discovery for this client without changing the process environment.
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRedirect(), _HTTPHandler(self), _HTTPSHandler(self))
 
     def check_cancelled(self) -> None:
         if self.cancel_event is not None and self.cancel_event.is_set():
@@ -169,12 +195,19 @@ class ChatClient:
         if self.cancel_event is None:
             self.cancel_event = threading.Event()
         self.cancel_event.set()
-        active = self._active_socket
-        if active is not None:
-            try:
-                active.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+        with self._socket_lock:
+            active = self._active_socket
+            if active is not None:
+                try:
+                    active.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def _release_socket(self):
+        with self._socket_lock:
+            active, self._active_socket = self._active_socket, None
+            if active is not None:
+                active.close()
 
     def _connection(self, kind, host, **kwargs):
         connection = kind(host, **kwargs)
@@ -183,7 +216,13 @@ class ChatClient:
         def tracked_connect():
             self.check_cancelled()
             connect()
-            self._active_socket = connection.sock
+            # urllib closes the connection socket after handing its makefile to
+            # HTTPResponse. Keep a separate handle so shutdown still interrupts
+            # that reader. A plain socket handle also works for TLS shutdown.
+            sock = connection.sock
+            with self._socket_lock:
+                self._active_socket = socket.socket(
+                    sock.family, sock.type, sock.proto, fileno=socket.dup(sock.fileno()))
             self.check_cancelled()
 
         connection.connect = tracked_connect
@@ -235,7 +274,7 @@ class ChatClient:
             self.check_cancelled()
             raise APIError("Unable to load models: " + _connection_failure(error)) from None
         finally:
-            self._active_socket = None
+            self._release_socket()
 
     def redact(self, text: str) -> str:
         return text.replace(self._api_key, "[REDACTED]")
@@ -347,7 +386,7 @@ class ChatClient:
             except APIError as error:
                 failure = error
             finally:
-                self._active_socket = None
+                self._release_socket()
             self.check_cancelled()
             if progress["generated"] or not failure.retryable or attempt >= self.config.max_retries:
                 raise failure from None
@@ -366,7 +405,19 @@ class ChatClient:
         finish = None
         phase = end_turn = None
         usage: dict = {}
-        for event in _events(response):
+
+        def events():
+            try:
+                yield from _events(response)
+            except _StreamEnded as error:
+                # Report enough to distinguish pre-output EOF from a lost final
+                # marker without logging response text or tool arguments.
+                raise APIError(
+                    f"{error}; finish_reason={finish if finish in ('stop', 'tool_calls', 'length', 'content_filter') else 'missing/unknown'}, "
+                    f"tool calls={len(calls)}, generated={'yes' if progress['generated'] else 'no'}",
+                    retryable=True) from None
+
+        for event in events():
             self.check_cancelled()
             if event == "[DONE]":
                 break
