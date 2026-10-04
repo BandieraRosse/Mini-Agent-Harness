@@ -13,7 +13,7 @@ python -m pip install -e .
 python -m miniagent --help
 ```
 
-建议使用虚拟环境。模型和密钥配置见 [使用指南](usage.md)，构建发布包见 [分发与安装](distribution.md)。自动测试使用临时目录和本地 HTTP 服务，不需要真实 API key。
+建议使用虚拟环境。模型和密钥配置见 [使用指南](usage.md)，构建发布包见 [分发与安装](distribution.md)。自动测试使用临时目录和模拟响应，不启动本地 HTTP 服务，不需要真实 API key。真实 HTTP 传输、分发服务及下载安装流程不再由自动回归覆盖，需按任务手动验证。
 
 ## 修改流程
 

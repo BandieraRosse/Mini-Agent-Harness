@@ -92,13 +92,16 @@ def _heading(record):
     return _short(name)
 
 
-def _limitations(result):
+def _limitations(result, name=""):
     if result.get("output_limit_reached"):
         yield "输出达到捕获上限；已保留开头和最新尾部，中间部分未保留。"
     elif result.get("has_more"):
         yield "工具输出已分页；仍有后续输出，可继续 poll_command。"
     elif result.get("truncated"):
-        yield "工具返回内容已截断；详细模式仅包含本次返回内容。"
+        if name == "read_file":
+            yield "本次仅读取部分文件；剩余内容可继续读取。"
+        else:
+            yield "工具返回内容已截断；详细模式仅包含本次返回内容。"
     if result.get("scan_truncated"):
         yield "搜索范围达到扫描上限。"
     if result.get("diff_truncated"):
@@ -174,6 +177,6 @@ def tool_fragments(record: ToolRecord, detailed=False) -> list[tuple[str, str]]:
             fragments.extend(_block("提示", result["guidance"]))
         elif result.get("next_action"):
             fragments.extend(_block("提示", result["next_action"]))
-    for notice in _limitations(result):
+    for notice in _limitations(result, record.name):
         fragments.append(("class:tool.muted", "  " + notice + "\n"))
     return fragments

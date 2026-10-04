@@ -2,6 +2,12 @@
 
 [文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
+## 移除本地 HTTP 集成测试（2026-10-04）
+
+按用户要求移除 43 项依赖本地 HTTP 服务的 API、分发、安装和启动集成测试及其服务辅助代码。保留模拟传输错误、安装 PATH 配置和其他离线测试。真实 HTTP/SSE 传输、分发路由与下载安装流程不再由当前自动回归覆盖；下文相关验证属于历史记录。
+
+本机 Linux 在受限沙箱内运行 `python -m unittest discover -s tests -v`：182 项，161 项通过，21 项跳过，无失败，无需网络权限。`compileall` 和 `git diff --check` 通过。本次未调用真实模型 API。
+
 ## 构建依赖缓存（2026-10-04）
 
 构建依赖默认缓存在 `dist/wheels/`，保存经 PyPI SHA-256 与纯 Python wheel 校验的下载文件及摘要。后续构建校验缓存后复用，不再请求 PyPI；缺失、损坏、不完整的缓存或新的依赖版本触发下载。显式 `--wheel-dir` 保持离线输入语义。进度写入 stderr，构建命令的 stdout 仍为 manifest JSON。

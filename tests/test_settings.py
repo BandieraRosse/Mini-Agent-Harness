@@ -65,33 +65,6 @@ class SettingsTests(unittest.TestCase):
             self.assertEqual(ui.choose("choose", [("a", "A"), ("b", "B")]), "b")
             self.assertIsNone(ui.choose("choose", [("a", "A")]))
 
-    def test_startup_selects_local_gpt_model_without_gateway_catalog(self):
-        original_init = Terminal.__init__
-
-        def terminal_init(ui, *args, **kwargs):
-            original_init(ui, *args, **kwargs)
-            ui.tty = True
-
-        from tests.test_api import http_server, answer
-        with http_server([{"body": answer("[final_answer]\nverified")}]) as (url, requests):
-            for run in range(2):
-                requests.clear()
-                output = io.StringIO()
-                with patch.object(Terminal, "__init__", terminal_init), \
-                        patch.object(Terminal, "choose", side_effect=["openai", "memory", "gpt-6-astra"]) as choose, \
-                        patch.object(Terminal, "ask", return_value=url.removesuffix("/v1")), \
-                        patch.object(Terminal, "read", side_effect=["hello", "/quit"]), \
-                        patch("getpass.getpass", return_value="synthetic-startup-key"), \
-                        redirect_stdout(output), redirect_stderr(output):
-                    code = main(["--plain", "--no-save", "-C", str(self.root)])
-                self.assertEqual(code, 0, output.getvalue())
-                self.assertEqual([item[0] for item in choose.call_args_list[0].args[1]], ["deepseek", "openai"])
-                self.assertEqual([r["path"] for r in requests], ["/v1/chat/completions"])
-                self.assertEqual(requests[0]["body"]["model"], "gpt-6-astra")
-                self.assertEqual(requests[0]["headers"]["Authorization"], "Bearer synthetic-startup-key")
-                self.assertNotIn("synthetic-startup-key", output.getvalue())
-                self.assertFalse(key_path(Preferences().config()).exists())
-
     def test_temporary_replacement_does_not_overwrite_saved_key(self):
         from miniagent.config import save_api_key, load_api_key
         config = Config(provider="openai", base_url="https://example.com/v1")

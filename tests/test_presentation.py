@@ -17,7 +17,8 @@ class PresentationTests(unittest.TestCase):
         text = rendered(record)
         self.assertIn("中文.py", text)
         self.assertIn("5–6 / 20", text)
-        self.assertIn("截断", text)
+        self.assertIn("本次仅读取部分文件", text)
+        self.assertNotIn("截断", text)
         self.assertNotIn("private detail", text)
 
     def test_search_summaries_count_returned_results(self):
