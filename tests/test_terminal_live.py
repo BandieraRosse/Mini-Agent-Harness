@@ -281,6 +281,145 @@ class LiveTerminalTests(unittest.TestCase):
             self.assertEqual(frames['end'][1], frames['draft'][1])
             self.assertEqual(len({frame[2] for frame in frames.values()}), 1)
 
+    def test_each_page_moves_the_visible_viewport_immediately(self):
+        with self.terminal() as env:
+            env.ui.notice('\n'.join(f'row {i:03d}' for i in range(200)))
+            names = ['initial', 'up', 'older', 'new_output', 'down', 'end', 'follow']
+            reached = {name: threading.Event() for name in names}
+            stage, frames = ['initial'], {}
+
+            def rendered(app, text):
+                if env.ui.editor.default_buffer.text != 'draft':
+                    return
+                info = app.transcript_window.render_info
+                frames[stage[0]] = (info.visible_line_to_row_col[0][0], info.window_height)
+                reached[stage[0]].set()
+            self.observe(env.ui, rendered)
+
+            def keys():
+                env.pipe.send_text('draft')
+                self.wait(reached['initial'])
+                for name, key in [('up', '\x1b[5~'), ('older', '\x1b[5~')]:
+                    stage[0] = name
+                    env.pipe.send_text(key)
+                    self.wait(reached[name])
+                stage[0] = 'new_output'
+                env.ui.notice('appended output')
+                self.wait(reached['new_output'])
+                for name in ['down', 'end', 'follow']:
+                    stage[0] = name
+                    env.pipe.send_text('\x1b[6~')
+                    self.wait(reached[name])
+                env.pipe.send_text('\r')
+            env.send(keys)
+            self.assertEqual(env.ui.read(), 'draft')
+            page = frames['initial'][1] - 1
+            self.assertEqual(frames['up'][0], frames['initial'][0] - page)
+            self.assertEqual(frames['older'][0], frames['up'][0] - page)
+            self.assertEqual(frames['new_output'][0], frames['older'][0])
+            self.assertEqual(frames['down'][0], frames['older'][0] + page)
+            self.assertEqual(frames['end'][0], frames['down'][0] + page)
+            self.assertGreater(frames['follow'][0], frames['end'][0])
+            self.assertIsNone(env.ui._scroll_line)
+
+    def test_wheel_scrolls_records_over_body_and_input_without_recalling_history(self):
+        from prompt_toolkit.key_binding import KeyPress
+        from prompt_toolkit.keys import Keys
+
+        with self.terminal() as env:
+            env.ui.editor.history.append_string('previous command')
+            env.ui.notice('\n'.join(f'row {i:03d}' for i in range(200)))
+            names = ['initial', 'body_up', 'input_up', 'input_down', 'native_up', 'native_down',
+                     'x10_up', 'urxvt_down', 'ctrl_up', 'windows_down']
+            reached = {name: threading.Event() for name in names}
+            stage, frames = ['initial'], {}
+
+            def rendered(app, text):
+                buffer = env.ui.editor.default_buffer
+                if buffer.text != 'working draft':
+                    return
+                self.assertEqual(buffer.cursor_position, len('working draft'))
+                self.assertIs(app.layout.current_window, app.composer_window)
+                info = app.transcript_window.render_info
+                frames[stage[0]] = info.visible_line_to_row_col[0][0]
+                reached[stage[0]].set()
+            self.observe(env.ui, rendered)
+
+            def keys():
+                env.pipe.send_text('working draft')
+                self.wait(reached['initial'])
+                app = env.ui._app
+                self.assertTrue(app.mouse_support())
+                for name, window, code in [('body_up', app.transcript_window, 64),
+                                           ('input_up', app.composer_window, 64),
+                                           ('input_down', app.composer_window, 65)]:
+                    stage[0] = name
+                    position = app.renderer._last_screen.visible_windows_to_write_positions[window]
+                    env.pipe.send_text(f'\x1b[<{code};{position.xpos + 1};{position.ypos + 1}M')
+                    self.wait(reached[name])
+                for name, key in [('native_up', Keys.ScrollUp), ('native_down', Keys.ScrollDown)]:
+                    stage[0] = name
+                    def feed(key=key):
+                        app.key_processor.feed(KeyPress(key))
+                        app.key_processor.process_keys()
+                    app.loop.call_soon_threadsafe(feed)
+                    self.wait(reached[name])
+                for name, packet in [('x10_up', '\x1b[M`!!'), ('urxvt_down', '\x1b[97;1;1M'),
+                                     ('ctrl_up', '\x1b[<80;1;1M')]:
+                    stage[0] = name
+                    env.pipe.send_text(packet)
+                    self.wait(reached[name])
+                stage[0] = 'windows_down'
+                def windows_wheel():
+                    app.key_processor.feed(KeyPress(Keys.WindowsMouseEvent, 'NONE;SCROLL_DOWN;0;0'))
+                    app.key_processor.process_keys()
+                app.loop.call_soon_threadsafe(windows_wheel)
+                self.wait(reached['windows_down'])
+                # A real arrow key still recalls history.
+                env.pipe.send_text('\x1b[A\r')
+            env.send(keys)
+            self.assertEqual(env.ui.read(), 'previous command')
+            self.assertEqual(frames['body_up'], frames['initial'] - 3)
+            self.assertEqual(frames['input_up'], frames['body_up'] - 3)
+            self.assertEqual(frames['input_down'], frames['body_up'])
+            self.assertEqual(frames['native_up'], frames['input_up'])
+            self.assertEqual(frames['native_down'], frames['input_down'])
+            self.assertEqual(frames['x10_up'], frames['native_up'])
+            self.assertEqual(frames['urxvt_down'], frames['native_down'])
+            self.assertEqual(frames['ctrl_up'], frames['native_up'])
+            self.assertEqual(frames['windows_down'], frames['native_down'])
+
+    def test_wheel_does_not_change_menu_selection(self):
+        from prompt_toolkit.key_binding import KeyPress
+        from prompt_toolkit.keys import Keys
+
+        with self.terminal() as env:
+            env.ui.notice('\n'.join(f'row {i:03d}' for i in range(200)))
+            ready, scrolled = threading.Event(), threading.Event()
+            initial = []
+
+            def rendered(app, text):
+                top = app.transcript_window.render_info.visible_line_to_row_col[0][0]
+                if not initial:
+                    initial.append(top)
+                    ready.set()
+                elif top < initial[0]:
+                    self.assertEqual(env.ui._request['index'], 0)
+                    scrolled.set()
+            self.observe(env.ui, rendered)
+
+            def keys():
+                self.wait(ready)
+                app = env.ui._app
+                def feed():
+                    app.key_processor.feed(KeyPress(Keys.ScrollUp))
+                    app.key_processor.process_keys()
+                app.loop.call_soon_threadsafe(feed)
+                self.wait(scrolled)
+                env.pipe.send_text('\x1b[B\r')
+            env.send(keys)
+            self.assertEqual(env.ui.choose('choose', [('first', 'First'), ('second', 'Second')]), 'second')
+
     def test_execution_hides_cursor_and_reuses_app_without_reprinting_transcript(self):
         with self.terminal() as env:
             ready, release = threading.Event(), threading.Event()
@@ -407,7 +546,7 @@ class LiveTerminalTests(unittest.TestCase):
 
             def keys():
                 self.wait(reached["initial"])
-                for name, key in [("home", "\x1b[1;5H"), ("middle", "\x1b[6~" * 2),
+                for name, key in [("home", "\x1b[1;5H"), ("middle", "\x1b[6~"),
                                   ("down", "\x1b[6~"), ("up", "\x1b[5~"),
                                   ("pageback", "\x1b[5~"), ("end", "\x1b[1;5F")]:
                     stage[0] = name

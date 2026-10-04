@@ -10,6 +10,8 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, ConditionalKeyBindings
+from prompt_toolkit.key_binding.bindings.mouse import load_mouse_bindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.containers import Float, FloatContainer
@@ -17,6 +19,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import BeforeInput, ConditionalProcessor, PasswordProcessor
 from prompt_toolkit.layout.screen import Char
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame
@@ -75,17 +78,20 @@ def build_app(terminal, styles):
                       dont_extend_height=True, wrap_lines=True, style='class:input')
     snapshot = []
     rows = [Point(0, 0)]
+    row_starts = [0]
     cached = None
     viewport_width = 1
 
     def content():
-        nonlocal snapshot, rows, cached
+        nonlocal snapshot, rows, row_starts, cached
         fragments = terminal.fragments()
         width = viewport_width
         if cached != (id(fragments), width):
             snapshot = fragments
             rows = []
+            row_starts = []
             for y, line in enumerate(fragment_list_to_text(snapshot).split('\n')):
+                row_starts.append(len(rows))
                 rows.append(Point(0, y))
                 used = 0
                 for x, char in enumerate(line):
@@ -109,8 +115,27 @@ def build_app(terminal, styles):
             viewport_width = max(1, width)
             return super().create_content(width, height)
 
-    body = Window(TranscriptControl(content, get_cursor_position=anchor,
-                                       show_cursor=False), wrap_lines=True)
+    class TranscriptWindow(Window):
+        def _scroll_when_linewrapping(self, ui_content, width, height):
+            # Position the viewport directly. Making a hidden cursor visible
+            # otherwise consumes the first page inside the current viewport.
+            bottom = max(0, len(rows) - height)
+            index = bottom if terminal._scroll_line is None else min(bottom, terminal._scroll_line)
+            point = rows[index]
+            self.horizontal_scroll = 0
+            self.vertical_scroll = point.y
+            self.vertical_scroll_2 = index - row_starts[point.y]
+
+    body = TranscriptWindow(TranscriptControl(content, get_cursor_position=anchor,
+                                             show_cursor=False), wrap_lines=True)
+
+    def scroll_by(amount):
+        info = body.render_info
+        height = info.window_height if info else 13
+        bottom = max(0, len(rows) - height)
+        position = bottom if terminal._scroll_line is None else min(bottom, terminal._scroll_line)
+        position = max(0, min(bottom, position + amount))
+        terminal._scroll_line = None if position == bottom else position
 
     def finish(value=None, error=None):
         with terminal._lock:
@@ -128,11 +153,48 @@ def build_app(terminal, styles):
     @bindings.add('pageup', eager=True)
     @bindings.add('pagedown', eager=True)
     def scroll(event):
-        position = len(rows) - 1 if terminal._scroll_line is None else terminal._scroll_line
         page = max(1, body.render_info.window_height - 1) if body.render_info else 12
-        position += -page if event.key_sequence[-1].key == 'pageup' else page
-        terminal._scroll_line = None if position >= len(rows) - 1 else max(0, position)
-        event.app.invalidate()
+        scroll_by(-page if event.key_sequence[-1].key == 'pageup' else page)
+
+    @bindings.add(Keys.ScrollUp, eager=True)
+    @bindings.add(Keys.ScrollDown, eager=True)
+    def wheel(event):
+        # Some inputs report wheels without coordinates. Override the toolkit
+        # fallback that feeds Up/Down into history and menu bindings.
+        scroll_by(-3 if event.key_sequence[-1].key == Keys.ScrollUp else 3)
+
+    mouse_bindings = load_mouse_bindings()
+
+    @bindings.add(Keys.Vt100MouseEvent, eager=True)
+    @bindings.add(Keys.WindowsMouseEvent, eager=True)
+    def positioned_mouse(event):
+        key = event.key_sequence[-1].key
+        direction = None
+        if key == Keys.WindowsMouseEvent:
+            event_type = event.data.split(';')[1]
+            if event_type == MouseEventType.SCROLL_UP.value:
+                direction = -3
+            elif event_type == MouseEventType.SCROLL_DOWN.value:
+                direction = 3
+        else:
+            # Wheel buttons 64/65, with Shift/Alt/Ctrl bits removed. Support
+            # X10, urxvt and SGR packets; their coordinate encodings differ.
+            data = event.data[2:]
+            if data.startswith('M'):
+                button = ord(data[1]) - 32
+            else:
+                button = int(data.lstrip('<').split(';')[0])
+                if not data.startswith('<'):
+                    button -= 32
+            button &= ~28
+            if button in {64, 65} and (data.startswith('M') or data.endswith('M')):
+                direction = -3 if button == 64 else 3
+        if direction is not None:
+            # Route wheels before hit testing, including input borders and
+            # completion menus. Leave clicks/selection to the toolkit.
+            scroll_by(direction)
+            return None
+        return mouse_bindings.get_bindings_for_keys((key,))[0].handler(event)
 
     @bindings.add('c-home', eager=True)
     def first(event):
@@ -225,7 +287,7 @@ def build_app(terminal, styles):
         Window(FormattedTextControl(footer), height=1, style='class:toolbar'),
     ]), floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu(max_height=9))])
     app = UnifiedApplication(layout=Layout(root, focused_element=control), key_bindings=bindings,
-                      full_screen=True, style=Style.from_dict(styles),
+                      full_screen=True, mouse_support=True, style=Style.from_dict(styles),
                       min_redraw_interval=0.03,
                       input=terminal.editor.app.input, output=terminal.editor.app.output)
     terminal._input_buffer = buffer
