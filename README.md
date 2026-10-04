@@ -6,6 +6,16 @@
 
 ## 快速开始
 
+Linux/macOS 下可直接运行 `make` 或 `make run`：首次启动自动创建 `.venv` 并安装增强终端依赖，随后运行当前源码。复用 `dist/wheels/` 的校验缓存；缓存缺失或损坏时从官方 PyPI 下载，不依赖 pip 配置的镜像，也不需要安装项目构建依赖。需要 Python 3.10+（含 `venv`、`pip`）和 Make，在交互终端中运行。
+
+```bash
+make run
+# 可选：启动时逐次审批，或指定目标目录
+make run ARGS="--ask -C /path/to/project"
+```
+
+也可手动安装并启动：
+
 ```bash
 python -m pip install -e .
 python -m miniagent

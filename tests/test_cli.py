@@ -65,7 +65,7 @@ class CLITests(unittest.TestCase):
     def test_noninteractive_denies_mutation_and_shell_but_returns_observations(self):
         calls = [{"id": "file", "type": "function", "function": {"name": "create_file", "arguments": '{"path":"new.txt","content":"data"}'}},
                  {"id": "shell", "type": "function", "function": {"name": "run_command", "arguments": '{"command":"echo should-not-run"}'}}]
-        code, _, requests, _ = self.invoke(["--no-save", "do work"], [completion(None, calls), completion("permission needed")])
+        code, _, requests, _ = self.invoke(["--ask", "--no-save", "do work"], [completion(None, calls), completion("permission needed")])
         self.assertEqual(code, 0)
         self.assertFalse((self.workspace / "new.txt").exists())
         results = [json.loads(item["content"]) for item in requests[1] if item["role"] == "tool"]
@@ -73,9 +73,9 @@ class CLITests(unittest.TestCase):
         self.assertTrue(all(result["ok"] is False for result in results))
         self.assertTrue(results[1]["denied"])
 
-    def test_trust_authorizes_reviewed_file_creation(self):
+    def test_default_trust_authorizes_reviewed_file_creation(self):
         calls = [{"id": "file", "type": "function", "function": {"name": "create_file", "arguments": '{"path":"new.txt","content":"data"}'}}]
-        code, output, _, _ = self.invoke(["--trust", "--no-save", "write file"], [completion(None, calls), completion("created")])
+        code, output, _, _ = self.invoke(["--no-save", "write file"], [completion(None, calls), completion("created")])
         self.assertEqual(code, 0)
         self.assertEqual((self.workspace / "new.txt").read_text(encoding="utf-8"), "data")
         self.assertIn("new.txt", output)

@@ -9,6 +9,47 @@ from miniagent.ui import Terminal, terminal_text
 
 
 class UITests(unittest.TestCase):
+    def test_usage_totals_and_visible_per_call_counts(self):
+        terminal = Terminal(Redactor(), plain=True)
+        terminal.context_provider = lambda: (64000, 256000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            terminal.usage({'prompt_tokens': 100, 'completion_tokens': 30,
+                            'prompt_tokens_details': {'cached_tokens': 60},
+                            'completion_tokens_details': {'reasoning_tokens': 20}})
+            terminal.usage({'input_tokens': 50, 'output_tokens': 10,
+                            'input_tokens_details': {'cached_tokens': 0},
+                            'output_tokens_details': {'reasoning_tokens': 0}})
+        self.assertEqual(terminal.tokens, {'prompt': 150, 'cached': 60,
+                                           'completion': 40, 'reasoning': 20})
+        self.assertIn('75.0%', terminal.statistics())
+        self.assertIn('192,000/256,000', terminal.statistics())
+        text = ''.join(text for _, text in terminal.fragments())
+        self.assertEqual(text.count('本次调用:'), 2)
+        self.assertIn('reasoning 20', text)
+        self.assertIn('reasoning 0', text)
+
+    def test_missing_usage_is_unknown_and_context_cannot_be_negative(self):
+        terminal = Terminal(Redactor(), plain=True)
+        terminal.context_provider = lambda: (300000, 256000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            terminal.usage({})
+            terminal.usage({'prompt_tokens': 12, 'completion_tokens': 5})
+        self.assertIn('0.0%', terminal.statistics())
+        self.assertIn('input 12+未知', terminal.statistics())
+        self.assertIn('缓存 input 未知', ''.join(text for _, text in terminal.fragments()))
+
+    def test_message_spacing_in_live_and_restored_transcripts(self):
+        terminal = Terminal(Redactor(), plain=True)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            terminal.user('hello')
+            terminal.stream('answer')
+            terminal.end_stream()
+        self.assertEqual(output.getvalue(), '› hello\n\nanswer\n\n')
+        terminal.restore([{'role': 'user', 'content': 'hello'},
+                          {'role': 'assistant', 'content': 'answer'}])
+        self.assertEqual(''.join(text for _, text in terminal.fragments()),
+                         '› hello\n\nanswer\n\n')
+
     def test_stream_releases_text_immediately_and_redacts_every_split(self):
         key = "sk-abcdefghijklmnop1234567890"
         for index in range(1, len(key)):
@@ -42,7 +83,7 @@ class UITests(unittest.TestCase):
             self.assertEqual(terminal.read(), "first\n\nsecond")
 
     def test_noninteractive_approval_denies_but_trust_displays_details(self):
-        terminal = Terminal(Redactor(), plain=True)
+        terminal = Terminal(Redactor(), approval='ask', plain=True)
         terminal.tty = False
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertFalse(terminal.approve("shell", "python test.py"))
@@ -58,7 +99,7 @@ class UITests(unittest.TestCase):
         self.assertEqual(terminal_text("\x9b31mtext\x9c"), "31mtext")
 
     def test_remembered_approval_matches_full_command_and_cwd_only(self):
-        terminal = Terminal(Redactor(), plain=True)
+        terminal = Terminal(Redactor(), approval='ask', plain=True)
         terminal.tty = True
         original = 'cwd: C:/project\ncommand: python test.py'
         with contextlib.redirect_stdout(io.StringIO()), patch('builtins.input', side_effect=['a', 'n', 'n']) as ask:
@@ -75,7 +116,7 @@ class UITests(unittest.TestCase):
             self.assertFalse(terminal.approve('shell', original))
 
     def test_redacted_commands_and_file_edits_cannot_be_remembered(self):
-        terminal = Terminal(Redactor(), plain=True)
+        terminal = Terminal(Redactor(), approval='ask', plain=True)
         terminal.tty = True
         with contextlib.redirect_stdout(io.StringIO()), patch('builtins.input', return_value='a'):
             self.assertFalse(terminal.approve('shell', 'echo [REDACTED]'))
@@ -151,6 +192,8 @@ class UITests(unittest.TestCase):
 
             with patch("sys.stdin.isatty", return_value=True), patch("prompt_toolkit.PromptSession", side_effect=factory):
                 terminal = Terminal(Redactor())
+            self.assertTrue(terminal.editor.show_frame)
+            self.assertEqual(terminal.editor.app.layout.current_window.style, 'class:input')
             pipe.send_text("first\x1b\rsecond\r")
             self.assertEqual(terminal.read(), "first\nsecond")
             pipe.send_text("\x03")

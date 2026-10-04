@@ -29,6 +29,9 @@ class Agent:
     def _size(self, value):
         return len(json.dumps(value, ensure_ascii=False)) if self.context_chars is not None else estimate_tokens(value)
 
+    def context_usage(self):
+        return estimate_tokens([*self.request_messages(), self.tools.schemas]), self.context_tokens
+
     def request_messages(self, active=None):
         active = self.session.active_messages() if active is None else active
         messages = [*self.fixed, *active]
@@ -70,6 +73,7 @@ class Agent:
         if self._size(summary_messages) > self.input_budget:
             raise ValueError("Summary input exceeds context budget; original history preserved.")
         response = self.client.complete(summary_messages, tools=None, stream=False)
+        self.ui.usage(response.get("usage") or {})
         summary = response["choices"][0]["message"].get("content")
         if not summary or len(summary) > 16_000:
             raise ValueError("Compaction produced empty/oversized memory; original history preserved")
@@ -155,13 +159,13 @@ class Agent:
                 if message.get('phase') == 'final_answer' and blockers:
                     message['completion_deferred'] = True
                 self.session.append(message)
-                self.ui.usage(response.get("usage") or {})
                 if not calls:
                     final = message.get("phase") == "final_answer"
                     if message.get("phase"):
                         unclassified = 0
                     display.finish(message, admitted=not final or not blockers)
                     self.ui.end_stream()
+                    self.ui.usage(response.get("usage") or {})
                     if final and not blockers:
                         self.session.data["status"] = "complete"
                         self.session.save()
@@ -184,6 +188,7 @@ class Agent:
                 unclassified = 0
                 display.finish(message)
                 self.ui.end_stream()
+                self.ui.usage(response.get("usage") or {})
                 dispatch = self.execute_calls(calls)
                 try:
                     self._observe_calls(dispatch)

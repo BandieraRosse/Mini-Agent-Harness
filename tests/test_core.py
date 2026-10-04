@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from miniagent.api import APIError
+from miniagent.budget import estimate_tokens
 from miniagent.core import Agent
 from miniagent.security import Redactor
 from miniagent.sessions import Session, read_checkpoint, validate_and_repair
@@ -54,6 +55,25 @@ class AgentTests(unittest.TestCase):
     def agent(self, *responses, **kwargs):
         client = ScriptedClient(responses)
         return Agent(client, self.session, self.tools, [], self.ui, **kwargs)
+
+    def test_context_statistics_include_fixed_messages_and_tools(self):
+        agent = self.agent(context_tokens=256000)
+        agent.fixed = [{'role': 'system', 'content': 'fixed instructions'}]
+        self.tools.schemas = [{'type': 'function', 'function': {'name': 'example_tool'}}]
+        self.session.append({'role': 'user', 'content': 'current input'})
+        self.assertEqual(agent.context_usage(),
+                         (estimate_tokens([*agent.request_messages(), self.tools.schemas]), 256000))
+
+    def test_usage_is_shown_after_reply_and_before_tools(self):
+        response = completion('working', [call('a')])
+        response['usage'] = {'prompt_tokens': 100, 'completion_tokens': 20}
+        agent = self.agent(response, completion('done'))
+        observed = []
+        self.ui.end_stream.side_effect = lambda: observed.append('reply')
+        self.ui.usage.side_effect = lambda usage: observed.append(('usage', usage))
+        self.tools.execute.side_effect = lambda *args: observed.append('tool') or {'ok': True}
+        agent.run('work')
+        self.assertEqual(observed[:3], ['reply', ('usage', response['usage']), 'tool'])
 
     def test_multiple_tools_are_checkpointed_before_action_then_all_observed(self):
         ids_seen_on_disk = []

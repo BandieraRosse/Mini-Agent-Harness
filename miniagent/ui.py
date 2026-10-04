@@ -20,6 +20,8 @@ STYLES = {
     'tool.command': 'bold', 'diff.add': 'ansigreen', 'diff.remove': 'ansired',
     'diff.header': 'ansicyan', 'user': 'ansicyan bold', 'notice': 'ansibrightblack',
     'error': 'ansired', 'heading': 'bold', 'toolbar': 'reverse',
+    'input': 'bg:ansibrightblack ansiwhite', 'input.prompt': 'ansicyan bold',
+    'frame.border': 'ansicyan', 'stats': 'ansicyan',
     'completion-menu.completion.current': 'reverse',
     'completion-menu.meta.completion': 'ansibrightblack',
 }
@@ -43,7 +45,7 @@ class TextRecord:
 
 
 class Terminal:
-    def __init__(self, redact, *, approval='ask', plain=False):
+    def __init__(self, redact, *, approval='trust', plain=False):
         self.redact, self.approval = redact, approval
         self.approval_rules = set()
         self.tty = sys.stdin.isatty()
@@ -56,7 +58,9 @@ class Terminal:
         self.stream_redactor = None
         self.streaming = False
         self.model = ''
-        self.tokens = {'prompt': 0, 'completion': 0}
+        self.tokens = {'prompt': 0, 'cached': 0, 'completion': 0, 'reasoning': 0}
+        self.usage_missing = set()
+        self.context_provider = None
         self._app = None
         self._lock = threading.RLock()
         self._cancel_event = None
@@ -89,13 +93,40 @@ class Terminal:
                     multiline=True, key_bindings=bindings, history=InMemoryHistory(),
                     completer=self.completer, complete_while_typing=True,
                     reserve_space_for_menu=9, style=Style.from_dict(STYLES if self.color else {}),
-                    bottom_toolbar=lambda: ' / 命令  ·  Ctrl+T 工具详情  ·  Alt+Enter 换行  ·  Ctrl+C 取消',
+                    bottom_toolbar=lambda: self.statistics() + '\n / 命令  ·  Ctrl+T 工具详情  ·  Alt+Enter 换行  ·  Ctrl+C 取消',
+                    lexer=self._input_lexer(),
+                    show_frame=True,
+                    prompt_continuation=lambda width, line, soft: [('class:input.prompt', '  ' if soft else '· ')],
                 )
+                from prompt_toolkit.layout.controls import BufferControl
+                for window in self.editor.app.layout.find_all_windows():
+                    if isinstance(window.content, BufferControl) and window.content.buffer is self.editor.default_buffer:
+                        window.style = 'class:input'
             except ImportError:
                 self.notice('增强交互需要 prompt-toolkit：python -m pip install .；当前使用普通输入。')
 
     def _safe(self, text):
         return terminal_text(self.redact(text))
+
+    @staticmethod
+    def _input_lexer():
+        from prompt_toolkit.lexers import SimpleLexer
+        return SimpleLexer('class:input')
+
+    def statistics(self):
+        context = '上下文剩余: 未知'
+        if self.context_provider is not None:
+            used, window = self.context_provider()
+            remaining = max(0, window - used)
+            context = f'上下文剩余 ≈{remaining / window:.1%} · {remaining:,}/{window:,} tokens（估算）'
+        values = []
+        for key, label in [('prompt', 'input'), ('cached', '缓存 input'),
+                           ('completion', 'output'), ('reasoning', 'reasoning')]:
+            value = f'{self.tokens[key]:,}'
+            if key in self.usage_missing:
+                value += '+未知'
+            values.append(f'{label} {value}')
+        return context + '\n累计: ' + ' · '.join(values)
 
     def _changed(self):
         self._fragments_cache = None
@@ -117,7 +148,7 @@ class Terminal:
 
     def print(self, text='', color=None):
         style = {'2': 'notice', '31': 'error', '36': 'user', '33': 'tool.running'}.get(color, '')
-        record = TextRecord(self._safe(text) + '\n', style)
+        record = TextRecord(self._safe(text).strip('\n') + '\n\n', style)
         self._append(record)
         if self._app is None:
             self._write([(f'class:{style}', record.text)])
@@ -129,7 +160,7 @@ class Terminal:
         self.print(f'! {text}', '31')
 
     def user(self, text):
-        self.print('\n› ' + text, '36')
+        self.print('› ' + text, '36')
 
     def round(self, number, model):
         self.model = model
@@ -153,7 +184,7 @@ class Terminal:
         with self._lock:
             if not self.streaming:
                 return
-            text = self._safe(self.stream_redactor.feed('', final=True)) + '\n'
+            text = self._safe(self.stream_redactor.feed('', final=True)) + '\n\n'
             self.stream_record.text += text
             self.streaming, self.stream_redactor, self.stream_record = False, None, None
             self._changed()
@@ -183,12 +214,30 @@ class Terminal:
             self.current_tool = None
             self._changed()
         if self._app is None:
-            self._write(tool_fragments(record, detailed=self.detailed))
+            self._write([*tool_fragments(record, detailed=self.detailed), ('', '\n')])
 
     def usage(self, usage):
-        self.tokens['prompt'] += usage.get('prompt_tokens', 0)
-        self.tokens['completion'] += usage.get('completion_tokens', 0)
-        self._append(TextRecord(f"  tokens: {usage.get('prompt_tokens', 0)} in | {usage.get('completion_tokens', 0)} out\n", 'notice', True))
+        counts = {
+            'prompt': usage.get('prompt_tokens', usage.get('input_tokens')),
+            'completion': usage.get('completion_tokens', usage.get('output_tokens')),
+            'cached': (usage.get('prompt_tokens_details') or usage.get('input_tokens_details') or {}).get(
+                'cached_tokens', usage.get('prompt_cache_hit_tokens')),
+            'reasoning': (usage.get('completion_tokens_details') or usage.get('output_tokens_details') or {}).get('reasoning_tokens'),
+        }
+        with self._lock:
+            for key, value in counts.items():
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    self.tokens[key] += value
+                else:
+                    counts[key] = None
+                    self.usage_missing.add(key)
+            labels = [('prompt', 'input'), ('cached', '缓存 input'), ('completion', 'output'), ('reasoning', 'reasoning')]
+            text = '  本次调用: ' + ' · '.join(
+                f'{label} {counts[key]:,}' if counts[key] is not None else f'{label} 未知'
+                for key, label in labels) + '\n\n'
+            self._append(TextRecord(text, 'notice'))
+        if self._app is None:
+            self._write([('class:notice', text)])
 
     def check_cancelled(self):
         if self._cancel_event is not None and self._cancel_event.is_set():
@@ -242,6 +291,7 @@ class Terminal:
             for event in self.events[start:]:
                 if isinstance(event, ToolRecord):
                     result.extend(tool_fragments(event, self.detailed))
+                    result.append(('', '\n'))
                 elif self.detailed or not event.detail_only:
                     result.append((f'class:{event.style}', event.text))
             if self._approval is not None:
@@ -382,6 +432,8 @@ class Terminal:
         return Application(layout=Layout(HSplit([
             Window(FormattedTextControl(lambda: f' MiniAgent · {self.model}'), height=1, style='class:heading'),
             body,
+            Window(FormattedTextControl(self.statistics), dont_extend_height=True,
+                   wrap_lines=True, style='class:stats'),
             Window(FormattedTextControl(footer), height=1, style='class:toolbar'),
         ]), focused_element=body), key_bindings=bindings, full_screen=True,
             style=Style.from_dict(STYLES if self.color else {}),
@@ -489,12 +541,12 @@ class Terminal:
         for message in messages:
             role = message.get('role')
             if role == 'user':
-                self.events.append(TextRecord('\n› ' + self._safe(message['content']) + '\n', 'user'))
+                self.events.append(TextRecord('› ' + self._safe(message['content']) + '\n\n', 'user'))
             elif role == 'assistant':
                 if message.get('completion_deferred'):
                     self.events.append(TextRecord('必需任务结果未齐，曾暂缓最终答复。\n', 'notice'))
                 elif message.get('content'):
-                    self.events.append(TextRecord(self._safe(message['content']) + '\n'))
+                    self.events.append(TextRecord(self._safe(message['content']) + '\n\n'))
                 for call in message.get('tool_calls', []):
                     function = call['function']
                     try:
@@ -568,7 +620,7 @@ class Terminal:
             from prompt_toolkit.document import Document
             draft = Document('')
             while True:
-                value = self.editor.prompt('› ', default=draft)
+                value = self.editor.prompt([('class:input.prompt', '› ')], default=draft)
                 if value is not _VIEW:
                     return value.strip()
                 draft = self.editor.default_buffer.document

@@ -6,6 +6,8 @@
 
 需要 Python 3.10+。在仓库根目录安装当前源码：
 
+Linux/macOS 下运行 `make` 或 `make run`，会自动准备 `.venv`、安装增强终端依赖并启动当前源码。安装复用分发构建的 `dist/wheels/` 校验缓存，缓存缺失或损坏时从官方 PyPI 下载，再通过 pip 离线安装固定版本；源码启动无需安装项目或下载 setuptools。`make install` 可单独安装或刷新依赖；`PYTHON` 指定用于创建虚拟环境的解释器，`VENV` 指定虚拟环境目录，`ARGS` 传递启动参数。启动命令保留终端输入输出，不默认启用 `--plain`。
+
 ```bash
 python -m pip install -e .
 python -m miniagent --help

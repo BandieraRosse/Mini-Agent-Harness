@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import __version__
 from .api import APIError, ChatClient
-from .config import Preferences, load_api_key, key_path
+from .config import GPT_MODELS, Preferences, load_api_key, key_path
 from .settings import select_source, credentials, DisconnectedClient
 from .context import fixed_messages
 from .core import Agent
@@ -41,6 +41,7 @@ def parser():
     result.add_argument("--context-chars", type=positive_int, default=None, help="Legacy character-budget override; prefer --context-tokens")
     permissions = result.add_mutually_exclusive_group()
     permissions.add_argument("--trust", action="store_true", help="Approve commands and edits for this invocation")
+    permissions.add_argument("--ask", action="store_true", help="Ask before each command and file edit (default: trust)")
     permissions.add_argument("--read-only", action="store_true", help="Allow inspection tools only; disable edits and shell commands")
     result.add_argument("--no-save", action="store_true", help="Keep this session only in memory")
     result.add_argument("--resume", nargs="?", const="latest", metavar="ID")
@@ -71,7 +72,7 @@ def main(argv=None):
     if not workspace.is_dir():
         argparser.error("workspace must be an existing directory")
     processes = None
-    ui = Terminal(Redactor(), approval="read-only" if args.read_only else "trust" if args.trust else "ask", plain=args.plain)
+    ui = Terminal(Redactor(), approval="read-only" if args.read_only else "ask" if args.ask else "trust", plain=args.plain)
     ui.detailed = args.verbose
     try:
         preferences = Preferences()
@@ -106,7 +107,7 @@ def main(argv=None):
             return ChatClient(settings, key)
         client = make_client(config)
         ui.model = config.model
-        known_models = [config.model]
+        known_models = default_models(config)
         if ui.completer is not None:
             ui.completer.choices["model"] = lambda: known_models
             ui.completer.choices["resume"] = lambda: ["latest", *[item["id"] for item in session.list_saved()[:30]]]
@@ -120,6 +121,7 @@ def main(argv=None):
             ui.notice(f"已恢复 {session.data['id']}；后台任务不跨进程恢复。")
         agent = Agent(client, session, registry, redact.value(fixed), ui, args.max_rounds, args.context_chars,
                       args.context_tokens)
+        ui.context_provider = agent.context_usage
 
         def connect(edit=False):
             nonlocal key, client, connected
@@ -135,11 +137,12 @@ def main(argv=None):
         if selected:
             try:
                 connect()
-                try:
-                    available = ui.run_action(client.list_models, client=client)
-                    known_models[:] = list(dict.fromkeys([config.model, *available]))
-                except (APIError, ValueError, OSError) as error:
-                    ui.notice(f"未能获取模型列表：{error}；可手动输入模型名称。")
+                if config.provider != "openai":
+                    try:
+                        available = ui.run_action(client.list_models, client=client)
+                        known_models[:] = list(dict.fromkeys([config.model, *available]))
+                    except (APIError, ValueError, OSError) as error:
+                        ui.notice(f"未能获取模型列表：{error}；可手动输入模型名称。")
                 model = choose_model(ui, config, known_models)
                 if model:
                     config = replace(config, model=model)
@@ -254,7 +257,7 @@ def main(argv=None):
                                 agent.client, agent.session, agent.tools = client, session, registry
                                 registry.bind_session(session)
                                 ui.model = config.model
-                                known_models[:] = [config.model]
+                                known_models[:] = default_models(config)
                                 ui.clear_history()
                                 ui.notice(f"已切换来源: {config.provider}/{config.model}；已新建会话，下次请求时验证凭据。")
                         elif action == "credentials":
@@ -267,12 +270,15 @@ def main(argv=None):
                             continue
                     if command == "/model":
                         if not argument:
-                            try:
-                                connect()
-                                available = ui.run_action(client.list_models, client=client)
-                                known_models[:] = list(dict.fromkeys([config.model, *available]))
-                            except (APIError, ValueError, OSError) as error:
-                                ui.notice(f"未能获取模型列表：{error}；仍可输入 /model 模型名称。")
+                            if config.provider == "openai":
+                                known_models[:] = list(dict.fromkeys([*default_models(config), *known_models]))
+                            else:
+                                try:
+                                    connect()
+                                    available = ui.run_action(client.list_models, client=client)
+                                    known_models[:] = list(dict.fromkeys([config.model, *available]))
+                                except (APIError, ValueError, OSError) as error:
+                                    ui.notice(f"未能获取模型列表：{error}；仍可输入 /model 模型名称。")
                             argument = choose_model(ui, config, known_models)
                             if not argument:
                                 continue
@@ -294,6 +300,7 @@ def main(argv=None):
                         ui.print(f"上下文窗口: {args.context_tokens} estimated tokens | 输入预算: {agent.input_budget}" +
                                  (' chars (legacy override)' if args.context_chars is not None else ' estimated tokens'))
                         ui.print(f"本次运行 tokens: {ui.tokens['prompt']} in | {ui.tokens['completion']} out")
+                        ui.print(ui.statistics())
                     elif command == "/paste" and ui.editor:
                         ui.notice("增强输入支持 Alt+Enter/Ctrl+J 换行，也可直接粘贴多行。")
                     elif command not in {"/help", "/new", "/clear", "/sessions", "/resume", "/save", "/compact", "/permissions", "/approval"}:
@@ -333,6 +340,10 @@ def show_sessions(ui, session):
         ui.notice("当前项目没有保存的会话。")
     for item in items[:30]:
         ui.print(f"{item['id']}  {item['title']}")
+
+
+def default_models(config):
+    return list(dict.fromkeys([config.model, *(GPT_MODELS if config.provider == "openai" else ())]))
 
 
 def choose_model(ui, config, known_models):

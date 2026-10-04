@@ -24,7 +24,7 @@ class LiveTerminalTests(unittest.TestCase):
                 return PromptSession(input=pipe, output=DummyOutput(), **kwargs)
 
             with patch("sys.stdin.isatty", return_value=True), patch("prompt_toolkit.PromptSession", side_effect=factory):
-                terminal = Terminal(Redactor())
+                terminal = Terminal(Redactor(), approval='ask')
             senders, failures, releases = [], [], []
             expired = threading.Event()
 

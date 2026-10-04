@@ -28,9 +28,11 @@ miniagent --provider openai --base-url https://example.com:8444/ --model your-mo
 miniagent --no-save --plain
 ```
 
-`--base-url` 可填服务根路径、API 前缀（如 `/v1`），或以 `/chat/completions` 结尾的完整接口。GPT 来源填写根路径时自动调用 `/v1/chat/completions`，模型列表为 `/v1/models`；有自定义路径时保留该前缀。只允许 HTTPS；本机 loopback 服务可用 HTTP，证书校验保持开启。
+`--base-url` 可填服务根路径、API 前缀（如 `/v1`），或以 `/chat/completions` 结尾的完整接口。GPT 来源填写根路径时自动调用 `/v1/chat/completions`；有自定义路径时保留该前缀。模型选择使用本地列表，不请求网关的 `/models`。只允许 HTTPS；本机 loopback 服务可用 HTTP，证书校验保持开启。
 
 仅提供 `deepseek` 和 `openai` 两种来源；后者表示指定 URL + API key 的 GPT 兼容服务，不需要 ChatGPT 登录。默认模型分别为 `deepseek-flash` 和 `gpt-6-astra`；请通过启动菜单、`--model` 或 `/model` 选择服务实际支持的模型。`login`、`logout`、`login-status` 和 `--account` 已移除。
+
+GPT 本地候选为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`、`gpt-6-luna`、`gpt-5.6-sol`，同时保留当前及本次运行手动选择的模型。候选不代表网关支持情况，可选择“输入其他模型名称…”或使用 `/model 名称`。GPT 的 `/model` 不需要连接或配置密钥即可选择；DeepSeek 仍从服务获取列表。
 
 ## 用户配置与密钥
 
@@ -55,7 +57,7 @@ API key 隐藏输入后可选「保存到用户目录」或「仅本次运行使
 | `/resume` | 打开会话选择；也支持 `/resume ID` 和 `/resume latest` |
 | `/save` | 保存；`--no-save` 下提示当前不保存 |
 | `/compact` | 立即压缩较早上下文 |
-| `/model` | 从服务返回的模型列表选择；`/model 名称` 直接切换，保留上下文 |
+| `/model` | GPT 从本地候选选择，DeepSeek 从服务列表选择；`/model 名称` 直接切换，保留上下文 |
 | `/settings` | API 来源、URL、模型、密钥保存和存储位置 |
 | `/provider` | 选择来源；也支持 `/provider deepseek|openai`，保存选择并开始新会话 |
 | `/permissions` | 选择 ask/trust/read-only；`rules` 查看本会话记住的命令，`reset` 清除 |
