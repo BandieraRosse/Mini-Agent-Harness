@@ -2,8 +2,10 @@
 import contextlib
 import importlib.util
 import io
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -600,7 +602,68 @@ class LiveTerminalTests(unittest.TestCase):
             env.send(keys)
             self.assertEqual(env.ui.ask('API key', secret=True), secret)
             self.assertTrue(shown.is_set())
+            self.assertTrue(any('API key › ' in frame and '*' * len(secret) in frame
+                                for frame in frames))
             self.assertNotIn(secret, '\n'.join(frames))
+            self.assertEqual(list(env.ui.editor.history.get_strings()), [])
+            self.assertEqual(env.ui.events, [])
+            self.assertEqual(env.ui.editor.default_buffer.text, '')
+
+    def test_configuration_accepts_line_feed_and_bracketed_key_paste(self):
+        with self.terminal() as env:
+            secret = 'test-pasted-key-456'
+            ready, pasted = threading.Event(), threading.Event()
+
+            def rendered(app, text):
+                request = env.ui._request
+                if request and request.get('secret'):
+                    ready.set()
+                    if env.ui.editor.default_buffer.text.strip() == secret:
+                        pasted.set()
+            self.observe(env.ui, rendered)
+
+            def keys():
+                self.wait(ready)
+                env.pipe.send_text('\x1b[200~' + secret + '\r\n\x1b[201~')
+                self.wait(pasted)
+                env.pipe.send_text('\n')
+            env.send(keys)
+            self.assertEqual(env.ui.ask('API key', secret=True), secret)
+            self.assertEqual(list(env.ui.editor.history.get_strings()), [])
+            self.assertEqual(env.ui.events, [])
+            env.pipe.send_text('https://example.com/v1\n')
+            self.assertEqual(env.ui.ask('GPT API 地址'), 'https://example.com/v1')
+
+    def test_first_time_credentials_can_be_entered_saved_and_reloaded(self):
+        from miniagent.config import Config, key_path, load_api_key
+        from miniagent.settings import credentials
+
+        with tempfile.TemporaryDirectory() as directory, self.terminal() as env:
+            root = Path(directory)
+            config = Config(provider='openai', base_url='https://example.com/v1')
+            secret = 'test-first-machine-key'
+            input_ready, save_ready = threading.Event(), threading.Event()
+
+            def rendered(app, text):
+                request = env.ui._request
+                if request and request['kind'] == 'ask' and request.get('secret'):
+                    input_ready.set()
+                elif request and request['kind'] == 'choose':
+                    save_ready.set()
+            self.observe(env.ui, rendered)
+
+            def keys():
+                self.wait(input_ready)
+                env.pipe.send_text(secret + '\r')
+                self.wait(save_ready)
+                env.pipe.send_text('\r')
+
+            with patch('miniagent.config.user_directory', return_value=root / 'profile'):
+                self.assertFalse(key_path(config).exists())
+                env.send(keys)
+                self.assertEqual(credentials(env.ui, config, root, env.ui.redact), secret)
+                self.assertEqual(load_api_key(config, root), secret)
+                self.assertEqual(key_path(config).read_text(encoding='utf-8'), secret + '\n')
             self.assertEqual(list(env.ui.editor.history.get_strings()), [])
             self.assertEqual(env.ui.events, [])
             self.assertEqual(env.ui.editor.default_buffer.text, '')

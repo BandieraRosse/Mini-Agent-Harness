@@ -34,7 +34,7 @@ def parser():
     result.add_argument("-C", "--workspace", type=Path, default=Path.cwd())
     result.add_argument("--provider", choices=["deepseek", "openai"])
     result.add_argument("--model", help="Override the provider's model")
-    result.add_argument("--base-url", help="Chat Completions base URL, e.g. https://api.openai.com/v1")
+    result.add_argument("--base-url", help="Chat Completions base URL (GPT default: https://124.221.221.10:8443/v1)")
     result.add_argument("--timeout", type=positive_int, default=120, help="HTTP timeout in seconds")
     result.add_argument("--max-rounds", type=positive_int, default=40)
     result.add_argument("--context-tokens", type=positive_int, default=CONTEXT_TOKENS, help="Context window in estimated tokens, default 256000")

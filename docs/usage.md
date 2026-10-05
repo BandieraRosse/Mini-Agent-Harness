@@ -21,11 +21,14 @@ miniagent -C /path/to/project --trust -p "修复失败测试并验证"
 # 需要每次文件修改和命令执行前确认
 miniagent -C /path/to/project --ask
 
-# OpenAI Chat Completions
+# GPT API（默认使用 CLIProxy）
 miniagent --provider openai --model gpt-6-astra
 
+# OpenAI 官方接口
+miniagent --provider openai --base-url https://api.openai.com/v1 --model your-model
+
 # 指定 GPT 服务 URL
-miniagent --provider openai --base-url https://example.com:8444/ --model your-model
+miniagent --provider openai --base-url https://example.com:8443/v1 --model your-model
 
 # 无保存、普通终端
 miniagent --no-save --plain
@@ -34,6 +37,8 @@ miniagent --no-save --plain
 `--base-url` 可填服务根路径、API 前缀（如 `/v1`），或以 `/chat/completions` 结尾的完整接口。GPT 来源填写根路径时自动调用 `/v1/chat/completions`；有自定义路径时保留该前缀。模型选择使用本地列表，不请求网关的 `/models`。只允许 HTTPS；本机 loopback 服务可用 HTTP，证书校验保持开启。
 
 仅提供 `deepseek` 和 `openai` 两种来源；后者表示指定 URL + API key 的 GPT 兼容服务，不需要 ChatGPT 登录。默认模型分别为 `deepseek-flash` 和 `gpt-6-astra`；请通过启动菜单、`--model` 或 `/model` 选择服务实际支持的模型。`login`、`logout`、`login-status` 和 `--account` 已移除。
+
+GPT API 的内置默认地址为本项目服务器的 CLIProxy：`https://124.221.221.10:8443/v1`，请求接口为 `/v1/chat/completions`。8444 端口是用量面板。已有保存的 GPT 地址仍优先使用，可在 `/settings` 修改；CLIProxy 使用该服务的 API key。旧 `.openai_api_key` 仍仅迁移到 OpenAI 官方地址，不自动用于 CLIProxy。
 
 GPT 本地候选为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`、`gpt-6-luna`、`gpt-5.6-sol`，同时保留当前及本次运行手动选择的模型。候选不代表网关支持情况，可选择“输入其他模型名称…”或使用 `/model 名称`。GPT 的 `/model` 不需要连接或配置密钥即可选择；DeepSeek 仍从服务获取列表。
 
@@ -45,9 +50,9 @@ GPT 本地候选为 `gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`、`gpt-6-luna`�
 
 优先级为本次命令行参数、已保存配置、内置默认值。命令行覆盖本身不写回；交互切换会保存。`--trust` 等权限仅本次运行有效。切换来源会保存旧会话、停止后台任务并开始新会话；同一来源切换模型保留上下文。
 
-API key 隐藏输入后可选「保存到用户目录」或「仅本次运行使用」。保存文件为一行 UTF-8 明文，POSIX 新建目录 0700、文件 0600；Windows 使用用户目录继承的访问权限。文件工具禁止访问用户配置目录，Shell 仍使用当前用户权限。`--no-save` 仅关闭项目会话保存，不关闭配置和显式保存的 key。仅本次使用不会删除此前保存的 key；重启后临时 key 消失。
+API key 隐藏输入后可选「保存到用户目录」或「仅本次运行使用」。增强终端中提示文字可见，仅输入的密钥显示为星号；输入或粘贴后按 Enter 提交。保存文件为一行 UTF-8 明文，POSIX 新建目录 0700、文件 0600；Windows 使用用户目录继承的访问权限。文件工具禁止访问用户配置目录，Shell 仍使用当前用户权限。`--no-save` 仅关闭项目会话保存，不关闭配置和显式保存的 key。仅本次使用不会删除此前保存的 key；重启后临时 key 消失。
 
-密钥按来源和接口地址隔离，更换地址不会复用旧 key。默认官方地址的旧 `.deepseek_api_key`、`.openai_api_key` 首次读取时复制到用户目录，不覆盖已有 key。旧 `custom` 配置迁移为 GPT 来源，仅导入接口完全匹配的旧 custom key；旧 ChatGPT 登录来源回退到 DeepSeek，旧 OAuth 文件不读取、不自动删除。无 TTY 时需事先准备对应的一行密钥文件；一次任务的隐藏输入不会自动保存。不读取环境变量，不提供 `--api-key` 参数。
+密钥按来源和接口地址隔离，更换地址不会复用旧 key。官方地址的旧 `.deepseek_api_key`、`.openai_api_key` 首次读取时复制到用户目录，不覆盖已有 key。旧 `custom` 配置迁移为 GPT 来源，仅导入接口完全匹配的旧 custom key；旧 ChatGPT 登录来源回退到 DeepSeek，旧 OAuth 文件不读取、不自动删除。无 TTY 时需事先准备对应的一行密钥文件；一次任务的隐藏输入不会自动保存。不读取环境变量，不提供 `--api-key` 参数。
 
 ## 交互命令
 

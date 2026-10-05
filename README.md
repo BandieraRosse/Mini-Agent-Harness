@@ -35,14 +35,14 @@ miniagent -C /path/to/project --trust -p "修复失败的测试并验证"
 # 恢复当前项目的最近会话
 miniagent --resume
 
-# OpenAI / 内存会话
+# GPT API（默认 CLIProxy）/ 内存会话
 miniagent --provider openai --no-save
 ```
 
-GPT 服务可在启动菜单输入地址，或使用命令：
+GPT API 默认地址为 `https://124.221.221.10:8443/v1`（CLIProxy，使用该服务的 API key）。已保存的地址优先使用；可在启动菜单修改地址，或使用命令：
 
 ```bash
-miniagent --provider openai --base-url https://your-server:8444/ --model your-model
+miniagent --provider openai --base-url https://your-server:8443/v1 --model your-model
 ```
 
 隐藏输入 API key 后可选择长期保存或仅本次使用。`/model` 查询模型列表并选择，`/model 模型名称` 直接切换。已移除 ChatGPT 登录、账号标签和 OAuth 依赖。
