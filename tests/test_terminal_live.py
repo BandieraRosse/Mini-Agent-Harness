@@ -87,6 +87,56 @@ class LiveTerminalTests(unittest.TestCase):
     def wait(self, event):
         self.assertTrue(event.wait(3), "expected terminal state was not reached")
 
+    def test_mouse_copy_includes_line_end_and_preserves_wrapped_unicode(self):
+        for source, reverse, last_only in (
+            ('last!', False, False), ('last!', True, False), ('last!', False, True),
+            ('中文🙂', False, False), ('cafe\u0301', False, False),
+            ('x' * 80, False, False), ('x' * 80, True, False),
+            ('x' * 78 + '终', False, False), ('x' * 85 + '终', False, False),
+            ('first\n中文🙂', False, False),
+        ):
+            with self.subTest(source=source, reverse=reverse, last_only=last_only), self.terminal() as env:
+                ui = env.ui
+                ui.stream(source)
+                ui.end_stream()
+                ready, copied = threading.Event(), threading.Event()
+                captured = []
+
+                def rendered(app, text):
+                    ready.set()
+                    if captured and app.transcript_selection['start'] is None:
+                        copied.set()
+                self.observe(ui, rendered)
+
+                def keys():
+                    self.wait(ready)
+                    app = ui._app
+                    body = app.transcript_window
+                    position = app.renderer._last_screen.visible_windows_to_write_positions[body]
+                    mapping = body.render_info._rowcol_to_yx
+                    lines = source.split('\n')
+                    last_row, last_col = len(lines) - 1, len(lines[-1]) - 1
+                    start_y, start_x = mapping[(last_row, last_col) if last_only else (0, 0)]
+                    end_y, _ = mapping[last_row, last_col]
+                    # Real terminal packets exercise screen hit testing. The
+                    # right-hand blank area used to clamp to the last glyph,
+                    # losing it from the exclusive selection range.
+                    first = (start_x + 1, start_y + 1)
+                    last = (position.xpos + position.width, end_y + 1)
+                    if reverse:
+                        first, last = last, first
+                    env.pipe.send_text(f'\x1b[<0;{first[0]};{first[1]}M'
+                                       f'\x1b[<32;{last[0]};{last[1]}M'
+                                       f'\x1b[<0;{last[0]};{last[1]}m\x03')
+                    self.wait(copied)
+                    expected = source[-1:] if last_only else source
+                    self.assertEqual(captured, [expected])
+                    self.assertEqual(app.clipboard.get_data().text, expected)
+                    env.pipe.send_text('draft\r')
+                with patch('miniagent.clipboard.copy_text', side_effect=lambda text, output: captured.append(text)):
+                    env.send(keys)
+                    self.assertEqual(ui.read(), 'draft')
+
     def test_mouse_selection_autoscrolls_and_ctrl_c_copies_without_cancelling_input(self):
         with self.terminal() as env:
             ui = env.ui

@@ -147,6 +147,10 @@ def tool_fragments(record: ToolRecord, detailed=False) -> list[tuple[str, str]]:
         fragments.append((f"class:tool.{state}", f" · exit {result['exit_code']}"))
     if result.get("elapsed") is not None:
         fragments.append(("class:tool.muted", f" · {result['elapsed']}s"))
+    if result.get("timeout") is not None:
+        fragments.append(("class:tool.muted", f" · 总时限 {result['timeout']:g}s"))
+    if result.get("status") == "running" and result.get("remaining") is not None:
+        fragments.append(("class:tool.muted", f" · 剩余 {result['remaining']:g}s"))
     fragments.append(("", "\n"))
     if detailed:
         fragments.extend(_details("Arguments", record.args))

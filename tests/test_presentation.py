@@ -8,6 +8,14 @@ def rendered(record, detailed=False):
 
 
 class PresentationTests(unittest.TestCase):
+    def test_command_summary_shows_runtime_limit_and_remaining_while_running(self):
+        result = {"ok": True, "status": "running", "timeout": 600, "remaining": 580.5}
+        text = rendered(ToolRecord("poll_command", {"job_id": "job1"}, result))
+        self.assertIn("总时限 600s", text)
+        self.assertIn("剩余 580.5s", text)
+        result.update(status="completed", remaining=0)
+        self.assertNotIn("剩余", rendered(ToolRecord("poll_command", {"job_id": "job1"}, result)))
+
     def test_read_summary_names_range_without_contents(self):
         record = ToolRecord("read_file", {"path": "中文.py"}, {
             "ok": True, "path": "中文.py", "offset": 5, "total_lines": 20,

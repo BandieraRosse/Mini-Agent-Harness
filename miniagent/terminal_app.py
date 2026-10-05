@@ -19,7 +19,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import BeforeInput, ConditionalProcessor, PasswordProcessor
 from prompt_toolkit.layout.screen import Char
-from prompt_toolkit.mouse_events import MouseButton, MouseEventType, MouseModifier
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType, MouseModifier
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Frame
@@ -163,6 +163,45 @@ def build_app(terminal, styles):
             return None
 
     class TranscriptWindow(Window):
+        def _write_to_screen_at_index(self, screen, mouse_handlers, write_position, parent_style, erase_bg):
+            super()._write_to_screen_at_index(screen, mouse_handlers, write_position, parent_style, erase_bg)
+            if (not self.render_info or not self.render_info.visible_line_to_row_col
+                    or write_position.width <= 0 or write_position.height <= 0):
+                return
+            original = mouse_handlers.mouse_handlers[write_position.ypos][write_position.xpos]
+            info = self.render_info
+
+            def handle(mouse_event):
+                release = selection['dragging'] and mouse_event.event_type == MouseEventType.MOUSE_UP
+                if (mouse_event.button != MouseButton.LEFT and not release
+                        or self not in app.layout.walk_through_modal_area()):
+                    return original(mouse_event)
+                # Window normally clamps blank cells to the last character's
+                # start. Selection uses exclusive end offsets, so that loses
+                # the final character. Map the blank area to the row's end.
+                y = min(mouse_event.position.y - write_position.ypos,
+                        max(info.visible_line_to_row_col))
+                row, start_col = info.visible_line_to_row_col[y]
+                line = selection['text'].split('\n')[row]
+                points = [(col, x) for (r, col), (sy, x) in info._rowcol_to_yx.items()
+                          if r == row and sy == y + write_position.ypos]
+                col, x = max(points, default=(start_col, write_position.xpos))
+                end = col + 1 if col < len(line) else len(line)
+                cells = get_cwidth(Char.display_mappings.get(line[col], line[col])) if col < len(line) else 0
+                while end < len(line) and get_cwidth(line[end]) == 0:
+                    end += 1
+                past_end = mouse_event.position.x >= x + cells
+                at_right_edge = mouse_event.position.x >= write_position.xpos + write_position.width - 1
+                if past_end or at_right_edge:
+                    return self.content.mouse_handler(MouseEvent(
+                        Point(end, row), mouse_event.event_type, mouse_event.button, mouse_event.modifiers))
+                return original(mouse_event)
+
+            mouse_handlers.set_mouse_handler_for_range(
+                x_min=write_position.xpos, x_max=write_position.xpos + write_position.width,
+                y_min=write_position.ypos, y_max=write_position.ypos + write_position.height,
+                handler=handle)
+
         def _scroll_when_linewrapping(self, ui_content, width, height):
             # Position the viewport directly. Making a hidden cursor visible
             # otherwise consumes the first page inside the current viewport.

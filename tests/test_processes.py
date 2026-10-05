@@ -62,6 +62,7 @@ class ProcessManagerTests(unittest.TestCase):
         self.assertIn("stderr-line", result["output"])
         self.assertEqual(result["cwd"], str(self.workspace / "nested"))
         self.assertTrue(result["complete"])
+        self.assertEqual(self.manager._jobs[result["job_id"]].timeout, 600)
         self.assertGreaterEqual(result["elapsed"], 0)
         self.assertEqual(self.approvals[0][0], "shell")
 
@@ -150,20 +151,46 @@ class ProcessManagerTests(unittest.TestCase):
     def test_waiting_poll_returns_new_output_and_then_completion(self):
         source = ("from pathlib import Path;import time;print('ready',flush=True);"
                   "\nwhile not Path('release').exists(): time.sleep(.01)"
-                  "\nprint('next',flush=True)")
+                  "\nprint('next',flush=True)"
+                  "\nwhile not Path('finish').exists(): time.sleep(.01)")
         started = self.manager.run(python_command(source), yield_time_ms=0)
         ready = self.wait_for(started["job_id"], lambda r: "ready" in r["output"])
         timer = threading.Timer(.15, lambda: (self.workspace / "release").touch())
         timer.start()
         try:
             before = time.monotonic()
-            result = self.manager.poll(started["job_id"], ready["next_offset"], wait_ms=3000)
+            result = self.manager.poll(started["job_id"], ready["next_offset"], wait_ms=300_000)
             self.assertGreaterEqual(time.monotonic() - before, .1)
+            self.assertLess(time.monotonic() - before, 3)
             self.assertIn("next", result["output"])
-            final = self.manager.poll(started["job_id"], result["next_offset"], wait_ms=3000)
+            self.assertFalse(result["complete"])
+            (self.workspace / "finish").touch()
+            final = self.manager.poll(started["job_id"], result["next_offset"], wait_ms=300_000)
             self.assertTrue(final["complete"])
         finally:
             timer.join()
+
+    def test_quiet_poll_waits_for_notification_without_periodic_checks(self):
+        started = self.manager.run(python_command("import time;time.sleep(10)"), yield_time_ms=0)
+        job = self.manager._jobs[started["job_id"]]
+        with mock.patch.object(job.changed, "wait", wraps=job.changed.wait) as wait:
+            result = self.manager.poll(job.job_id, wait_ms=150)
+        self.assertFalse(result["complete"])
+        self.assertEqual(wait.call_count, 1)
+
+    def test_runtime_metadata_uses_original_deadline_and_stops_at_completion(self):
+        started = self.manager.run(python_command("import time;time.sleep(10)"), timeout=30, yield_time_ms=0)
+        job = self.manager._jobs[started["job_id"]]
+        with mock.patch.object(processes.time, "monotonic", return_value=job.started + 4):
+            result = self.manager._result(job, 0)
+            self.assertEqual(result["timeout"], 30)
+            self.assertEqual(result["elapsed"], 4)
+            self.assertEqual(result["remaining"], 26)
+        final = self.manager.cancel(job.job_id)
+        self.assertEqual(final["remaining"], 0)
+        self.assertEqual(final["timeout"], 30)
+        with mock.patch.object(processes.time, "monotonic", return_value=job.started + 100):
+            self.assertEqual(self.manager.poll(job.job_id)["elapsed"], final["elapsed"])
 
     def test_poll_wait_is_bounded_and_cancellable(self):
         started = self.manager.run(python_command("import time;time.sleep(10)"), yield_time_ms=0)
@@ -177,7 +204,7 @@ class ProcessManagerTests(unittest.TestCase):
         try:
             before = time.monotonic()
             with self.assertRaises(KeyboardInterrupt):
-                self.manager.poll(started["job_id"], wait_ms=60_000)
+                self.manager.poll(started["job_id"], wait_ms=300_000)
             self.assertLess(time.monotonic() - before, 3)
             self.assertEqual(self.manager._jobs[started["job_id"]].reason, "cancelled")
         finally:
@@ -189,13 +216,21 @@ class ProcessManagerTests(unittest.TestCase):
         self.assertEqual(failed["error_code"], "COMMAND_FAILED")
         self.assertFalse(failed["retryable"])
         self.assertIn("output", failed["next_action"])
-        for kwargs in [{"yield_time_ms": True}, {"yield_time_ms": -1}, {"max_output_bytes": 1}]:
+        for kwargs in [{"yield_time_ms": True}, {"yield_time_ms": -1},
+                       {"yield_time_ms": 60001}, {"max_output_bytes": 1}]:
             result = self.manager.run("echo never", **kwargs)
             self.assertEqual(result["error_code"], "INVALID_ARGUMENT")
-        for kwargs in [{"wait_ms": 60001}, {"max_output_bytes": True}]:
+        for wait_ms in [0, 60001, 300_000]:
+            self.assertTrue(self.manager.poll(failed["job_id"], wait_ms=wait_ms)["complete"])
+        for kwargs in [{"wait_ms": 300001}, {"wait_ms": -1}, {"wait_ms": True},
+                       {"max_output_bytes": True}]:
             self.assertEqual(self.manager.poll(failed["job_id"], **kwargs)["error_code"], "INVALID_ARGUMENT")
         timeout = self.manager.run(python_command("import time;time.sleep(10)"), timeout=.1)
         self.assertEqual(timeout["error_code"], "COMMAND_TIMEOUT")
+        self.assertEqual(timeout["timeout"], .1)
+        self.assertEqual(timeout["remaining"], 0)
+        self.assertIn("total runtime limit of 0.1 seconds", timeout["error"])
+        self.assertIn("process tree was terminated", timeout["error"])
 
     def test_approval_denial_never_runs_command(self):
         self.manager.approve = lambda kind, details: False
@@ -339,7 +374,7 @@ class ProcessManagerTests(unittest.TestCase):
 
         def create_interrupting_job(*args, **kwargs):
             job = real_job(*args, **kwargs)
-            original_wait = job.done.wait
+            original_wait = job.changed.wait
             calls = 0
 
             def interrupted_wait(*wait_args, **wait_kwargs):
@@ -349,7 +384,7 @@ class ProcessManagerTests(unittest.TestCase):
                     raise KeyboardInterrupt
                 return original_wait(*wait_args, **wait_kwargs)
 
-            job.done.wait = interrupted_wait
+            job.changed.wait = interrupted_wait
             return job
 
         with mock.patch.object(processes, "_Job", side_effect=create_interrupting_job):

@@ -80,14 +80,14 @@ SCHEMAS = [
             ["patch"]),
     _schema("run_command", "Run an approved shell command. Returns when complete or yield_time_ms elapses; poll running jobs to completion. Commands run with user permissions.",
             {"command": _string("Shell command"), "cwd": _string("Workspace-relative directory, default '.'"),
-             "timeout": {"type": "number", "minimum": 0, "maximum": 86400, "description": "Positive seconds before termination, default 120"},
+             "timeout": {"type": "number", "minimum": 0, "maximum": 86400, "description": "Total process lifetime in positive seconds, default 600; termination deadline is not extended by polling. Set explicitly for long tasks"},
              "background": {"type": "boolean", "description": "Compatibility shortcut for yield_time_ms=0"},
              "purpose": {"type": "string", "enum": ["task", "service"], "description": "Default task: completion must be observed before final answer. service: intentional long-lived server, never tests/builds; stops when MiniAgent exits."},
              "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 60000, "description": "Wait before returning, default 10000; separate from process timeout"},
              "max_output_bytes": {"type": "integer", "minimum": 256, "maximum": 65536, "description": "Combined UTF-8 budget for output and output_tail, default 16384"}}, ["command"]),
     _schema("poll_command", "Read an existing job without rerunning. Use next_offset; wait_ms waits for new output or completion. Omitted ranges are explicit; output_tail is a separate latest preview.",
             {"job_id": _string("ID from run_command"), "offset": {"type": "integer", "minimum": 0},
-             "wait_ms": {"type": "integer", "minimum": 0, "maximum": 60000, "description": "Default 1000; use longer waits for quiet jobs"},
+             "wait_ms": {"type": "integer", "minimum": 0, "maximum": 300000, "description": "Default 1000; wait up to 300000 ms for quiet jobs, returning early on unread output or completion"},
              "max_output_bytes": {"type": "integer", "minimum": 256, "maximum": 65536}}, ["job_id"]),
     _schema("cancel_command", "Cancel a known running job and its child processes.",
             {"job_id": _string("ID from run_command")}, ["job_id"]),
@@ -580,7 +580,7 @@ class ToolRegistry:
             changes.append((target, original, updated.encode("utf-8")))
         return self._commit(changes)
 
-    def _run_command(self, command: str, cwd: str = ".", timeout: float = 120, background: bool = False,
+    def _run_command(self, command: str, cwd: str = ".", timeout: float = 600, background: bool = False,
                      yield_time_ms: int = 10_000, max_output_bytes: int = 16_384, purpose: str = "task") -> dict:
         if not command.strip():
             raise ToolError("command must not be empty.")

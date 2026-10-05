@@ -23,6 +23,7 @@ def preview_result(message, limit):
     except ValueError:
         value = {}
     keep = ("ok", "error_code", "exit_code", "status", "complete", "job_id", "purpose",
+            "elapsed", "timeout", "remaining",
             "partial_write", "applied_files", "uncertain", "denied", "declined", "next_offset")
     result = {key: value[key] for key in keep if isinstance(value, dict) and key in value}
     result.update(result_ref=message["tool_call_id"], context_truncated=True,

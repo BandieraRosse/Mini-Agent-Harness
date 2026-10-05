@@ -90,15 +90,15 @@
 
 | 工具及参数 | 行为 |
 | --- | --- |
-| `run_command(command, cwd=".", timeout=120, background=false, yield_time_ms=10000, max_output_bytes=16384, purpose="task")` | 等待命令完成或达到 `yield_time_ms` 后返回。未完成时携带运行中的 `job_id`；`background=true` 等价于本次等待为 0。`timeout` 为大于 0 且不超过 86,400 的秒数，独立限制进程总运行时间。 |
+| `run_command(command, cwd=".", timeout=600, background=false, yield_time_ms=10000, max_output_bytes=16384, purpose="task")` | 等待命令完成或达到 `yield_time_ms` 后返回。未完成时携带运行中的 `job_id`；`background=true` 等价于本次等待为 0。`timeout` 为大于 0 且不超过 86,400 的秒数，默认 600 秒（10 分钟），独立限制进程总运行时间；轮询不会延长这个期限，长任务应在启动时显式设置。 |
 | `poll_command(job_id, offset=0, wait_ms=1000, max_output_bytes=16384)` | 查询原任务，不会重复执行。已有未读输出立即返回，否则等待新输出、结束或 `wait_ms` 到期。用返回的 `next_offset` 继续读取；偏移为经过脱敏后的绝对 UTF-8 字节位置。 |
 | `cancel_command(job_id)` | 取消进程及其子进程。任务状态返回 `cancelled`，未完成的命令为 `ok: false`。 |
 
-结果包含 `output`、`exit_code`、`elapsed`、`cwd`、`job_id`、`status`、`complete`、`next_offset` 和截断标志。运行中 `exit_code` 为 `null`；`status` 为 `running`、`completed`、`timed_out` 或 `cancelled`。非零退出码、超时和取消都会令 `ok` 为 `false`。
+结果包含 `output`、`exit_code`、`elapsed`、`timeout`、`remaining`、`cwd`、`job_id`、`status`、`complete`、`next_offset` 和截断标志。`elapsed` 为已运行秒数，`timeout` 为启动时设置的总运行时限，`remaining` 为距离该期限的剩余秒数（最少为 0，终态统一为 0）；轮询不会重置期限，终态耗时不再增长。运行中 `exit_code` 为 `null`；`status` 为 `running`、`completed`、`timed_out` 或 `cancelled`。非零退出码、超时和取消都会令 `ok` 为 `false`；超时错误明确说明总运行时限已到且进程树已终止。
 
 Windows 优先使用 `pwsh`，否则使用 Windows PowerShell（都关闭 profile 并设置 UTF-8）；两者均不可用时才回退 cmd。POSIX 固定使用 `/bin/sh`，不依赖登录 Shell。实际可执行文件路径会传入模型的运行环境上下文。
 
-`yield_time_ms` / `wait_ms` 为 0–60,000 的整数毫秒；`max_output_bytes` 为 256–65,536，默认 16 KiB，限制本次 `output` 和 `output_tail` 的合计 UTF-8 字节数（元数据不计入）。等待可取消；轮询时取消会终止对应任务的进程树。`has_more` 表示已有输出尚未读完，`complete` 表示进程结束，二者分别检查；启动成功不代表测试成功。
+`yield_time_ms` 为 0–60,000 的整数毫秒，默认 10,000，仅控制首次调用的等待时间；`wait_ms` 为 0–300,000 的整数毫秒，默认 1,000，仅控制本次轮询等待时间，有未读输出或任务结束时提前返回。两者到期都不会终止进程，进程总运行期限由 `timeout` 独立控制。`max_output_bytes` 为 256–65,536，默认 16 KiB，限制本次 `output` 和 `output_tail` 的合计 UTF-8 字节数（元数据不计入）。等待可取消；轮询时取消会终止对应任务的进程树。`has_more` 表示已有输出尚未读完，`complete` 表示进程结束，二者分别检查；启动成功不代表测试成功。
 
 每个任务最多保留 1 MiB 脱敏输出。超出后保留约一半开头和一半滚动尾部，按完整 UTF-8 字符切分；不写额外日志文件。`total_bytes` 是累计产生的脱敏输出量，`captured_bytes` 是当前保留量，`dropped_bytes` 是已丢弃量。`head_end_offset` 和 `tail_start_offset` 描述保留边界，`omitted_range` 明确标记未保留的半开字节区间；它们不是连续拼接后的虚拟偏移。
 
@@ -107,5 +107,7 @@ Windows 优先使用 `pwsh`，否则使用 Windows PowerShell（都关闭 profil
 `purpose` 只能为 `task` 或 `service`。默认 `task` 必须返回终态结果才能接受本轮最终答复，已经退出但尚未查询的任务也阻塞收尾。`service` 仅用于明确需要持续运行的服务器等，不能用于测试/构建以绕过等待；它不阻塞收尾，但仍受 timeout 和会话生命周期约束，退出时不会作为守护进程保留。
 
 最多保留 32 个任务槽位，必要时仅回收终态已经返回的任务或已结束的服务，避免丢失尚未读取的必需任务结果。进程、输出和任务 ID 均只存在于当前运行中。
+
+等待通过条件变量接收输出和任务完成通知，安静任务无需每 50 毫秒检查状态。绑定外部取消事件时最多每 250 毫秒检查一次取消标志；输出和完成通知仍立即唤醒等待。
 
 任务 ID 只在当前进程内有效；恢复历史会话不会自动重放命令，未知 ID 返回 `uncertain: true`。命令在执行前展示命令内容与目录并经过权限回调。路径检查用于减少操作失误，Shell 仍具有当前操作系统用户的权限，不是沙箱。

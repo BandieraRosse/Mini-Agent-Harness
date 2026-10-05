@@ -1,4 +1,5 @@
 import ssl
+import errno
 import io
 import json
 import socket
@@ -105,6 +106,25 @@ class APITests(unittest.TestCase):
                     self.assertEqual(opener.call_count, expected_requests)
 
     def test_cancel_interrupts_response_after_urllib_closes_socket(self):
+        # Some execution sandboxes forbid socket.shutdown even for local
+        # socket pairs. Probe the OS capability directly, not client.cancel:
+        # skip only that environment restriction, never an implementation
+        # failure. Normal development/CI must still verify cancellation.
+        try:
+            local, peer = socket.socketpair()
+        except OSError as error:
+            if error.errno in (errno.EPERM, errno.EACCES):
+                self.skipTest("Execution environment forbids local socket pairs; cancellation requires them")
+            raise
+        try:
+            local.shutdown(socket.SHUT_RDWR)
+        except OSError as error:
+            if error.errno in (errno.EPERM, errno.EACCES):
+                self.skipTest("Execution environment forbids socket.shutdown; API cancellation cannot be tested here")
+            raise
+        finally:
+            local.close()
+            peer.close()
         for operation in ('stream', 'json', 'models'):
             with self.subTest(operation=operation):
                 client = ChatClient(Config(provider="openai", max_retries=0), "secret-token")

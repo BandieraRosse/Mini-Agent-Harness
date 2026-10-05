@@ -168,6 +168,7 @@ class _Job:
         self.reason: str | None = None
         self.capture_error: str | None = None
         self.lock = threading.RLock()
+        self.changed = threading.Condition(self.lock)
         self.kill_lock = threading.Lock()
         self.done = threading.Event()
         self.reader: threading.Thread | None = None
@@ -201,8 +202,8 @@ class ProcessManager:
         return tool_failure(code, self._safe(message), **extra)
 
     @staticmethod
-    def _output_options(wait_ms: int, max_output_bytes: int) -> bool:
-        return (type(wait_ms) is int and 0 <= wait_ms <= 60_000
+    def _output_options(wait_ms: int, max_output_bytes: int, max_wait_ms: int = 60_000) -> bool:
+        return (type(wait_ms) is int and 0 <= wait_ms <= max_wait_ms
                 and type(max_output_bytes) is int and 256 <= max_output_bytes <= 65_536)
 
     def _wait(self, job: _Job, wait_ms: int, offset: int | None = None) -> None:
@@ -212,13 +213,15 @@ class ProcessManager:
             if event is not None and event.is_set():
                 self._cancel(job)
                 raise KeyboardInterrupt()
-            with job.lock:
+            with job.changed:
                 if job.done.is_set() or (offset is not None and job.total_bytes > offset):
                     return
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            job.done.wait(min(0.05, remaining))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                # Output and completion wake the condition immediately. A plain
+                # external cancellation Event needs a bounded fallback check.
+                job.changed.wait(min(0.25, remaining) if event is not None else remaining)
 
     def _environment(self) -> dict[str, str]:
         current_secrets = (*self.secrets, *getattr(self.redact, "secrets", ()))
@@ -262,7 +265,7 @@ class ProcessManager:
                 break
         return False
 
-    def run(self, command: str, cwd: str = ".", timeout: float = 120,
+    def run(self, command: str, cwd: str = ".", timeout: float = 600,
             background: bool = False, yield_time_ms: int = 10_000,
             max_output_bytes: int = PAGE_BYTES, purpose: str = "task") -> dict:
         cancel_event = getattr(self, "cancel_event", None)
@@ -358,6 +361,8 @@ class ProcessManager:
         data = self._safe(text).encode("utf-8")
         with job.lock:
             job.total_bytes += len(data)
+            if data:
+                job.changed.notify_all()
             if not job.tail and not job.dropped_bytes and len(job.output) + len(data) <= MAX_CAPTURE_BYTES:
                 job.output.extend(data)
                 return
@@ -435,7 +440,8 @@ class ProcessManager:
         finally:
             with job.lock:
                 job.ended = time.monotonic()
-            job.done.set()
+                job.done.set()
+                job.changed.notify_all()
 
     def _result(self, job: _Job, offset: int, max_output_bytes: int = PAGE_BYTES) -> dict:
         with job.lock:
@@ -458,10 +464,12 @@ class ProcessManager:
             complete = job.done.is_set()
             status = (job.reason or "completed") if complete else "running"
             code = job.process.returncode if complete else None
+            elapsed = (job.ended if job.ended is not None else time.monotonic()) - job.started
             result = {"ok": job.capture_error is None and status not in {"timed_out", "cancelled"} and (code in (None, 0)),
                       "job_id": job.job_id, "status": status, "complete": complete, "purpose": job.purpose,
                       "output": self._safe(text), "exit_code": code,
-                      "elapsed": round((job.ended or time.monotonic()) - job.started, 3),
+                      "elapsed": round(elapsed, 3), "timeout": job.timeout,
+                      "remaining": round(max(0, job.timeout - elapsed), 3) if not complete else 0,
                       "cwd": self._safe(str(job.cwd)), "offset": offset, "next_offset": end,
                       "has_more": end < size, "truncated": end < size or job.dropped_bytes > 0,
                       "captured_bytes": head_end + len(job.tail), "total_bytes": size,
@@ -480,7 +488,10 @@ class ProcessManager:
                 result.update(self._error(job.capture_error, "OUTPUT_CAPTURE_FAILED"))
             elif status in {"timed_out", "cancelled"}:
                 error_code = "COMMAND_TIMEOUT" if status == "timed_out" else "COMMAND_CANCELLED"
-                result.update(self._error(f"Command {status}.", error_code))
+                message = (f"Command exceeded its total runtime limit of {job.timeout:g} seconds; "
+                           "the process tree was terminated." if status == "timed_out"
+                           else "Command cancelled.")
+                result.update(self._error(message, error_code))
             elif complete and code != 0:
                 result.update(self._error(f"Command exited with code {code}.", "COMMAND_FAILED"))
             return result
@@ -491,8 +502,8 @@ class ProcessManager:
             return self._error("Unknown job ID in this run. Its previous outcome is uncertain; the command has not been replayed.", "UNKNOWN_JOB", uncertain=True)
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             return self._error("offset must be a nonnegative byte offset.", "INVALID_OFFSET")
-        if not self._output_options(wait_ms, max_output_bytes):
-            return self._error("wait_ms must be 0..60000 and max_output_bytes must be 256..65536 integers.")
+        if not self._output_options(wait_ms, max_output_bytes, max_wait_ms=300_000):
+            return self._error("wait_ms must be 0..300000 and max_output_bytes must be 256..65536 integers.")
         job = self._jobs[job_id]
         initial = self._result(job, offset, max_output_bytes)
         if initial.get("error_code") == "INVALID_OFFSET":
@@ -526,8 +537,10 @@ class ProcessManager:
                 job.reader.join(timeout=3)
             elif job.process.stdout:
                 job.process.stdout.close()
-            job.ended = time.monotonic()
-            job.done.set()
+            with job.lock:
+                job.ended = time.monotonic()
+                job.done.set()
+                job.changed.notify_all()
         else:
             job.done.wait(timeout=5)
 

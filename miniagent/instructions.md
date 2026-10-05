@@ -23,8 +23,11 @@ Narrow searches with a file path or include_glob/exclude_glob. Use files_only to
 locate relevant files, then context_lines or read_file to inspect the needed code.
 For commands, choose syntax for the stated OS and shell; explicitly set cwd when
 needed. Commands return after yield_time_ms even if still running; timeout is a
-separate process deadline. Poll running job IDs with next_offset and wait_ms to
+separate process deadline (default 600 seconds), not extended by polling. Set
+timeout explicitly for longer tasks. Poll running job IDs with next_offset and wait_ms to
 wait for new output or completion instead of repeated empty immediate polls.
+Command results report timeout and remaining seconds; polling does not reset
+the deadline. remaining is zero for completed, timed-out, or cancelled jobs.
 Use max_output_bytes to bound verbose results. If output was dropped, inspect
 output_tail for the latest conclusion; it is separate from the output page.
 omitted_range/skipped_range mark missing absolute byte ranges. Tail previews do

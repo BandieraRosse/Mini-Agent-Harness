@@ -297,10 +297,17 @@ class ToolTests(unittest.TestCase):
                            ("read_file", {"path": "x", "limit": True}),
                            ("find_files", {"limit": 201}), ("find_files", {"typo": 3}),
                            ("run_command", {"command": "echo hello", "timeout": float("nan")}),
+                           ("run_command", {"command": "echo hello", "yield_time_ms": 60001}),
+                           ("poll_command", {"job_id": "job1", "wait_ms": 300001}),
                            ("replace_text", {"path": "x", "old_text": "a", "new_text": "b"})]:
             with self.subTest(name=name, args=args):
                 self.assertFalse(self.registry.execute(name, args)["ok"])
         self.assertEqual(self.call("run_command", command="echo hello")["called"], "run")
+        self.assertEqual(self.call("run_command", command="echo hello")["timeout"], 600)
+        self.assertEqual(self.call("run_command", command="echo hello", timeout=120)["timeout"], 120)
+        self.assertEqual(self.call("run_command", command="echo hello", yield_time_ms=60000)["yield_time_ms"], 60000)
+        for wait_ms in [0, 60001, 300000]:
+            self.assertEqual(self.call("poll_command", job_id="job1", wait_ms=wait_ms)["wait_ms"], wait_ms)
         self.assertEqual(self.call("poll_command", job_id="job1", offset=20)["offset"], 20)
         self.assertEqual(self.call("cancel_command", job_id="job1")["called"], "cancel")
         self.assertFalse(self.call("run_command", command="echo hello", cwd="../")["ok"])
