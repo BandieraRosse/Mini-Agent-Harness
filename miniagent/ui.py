@@ -1,6 +1,7 @@
 ﻿"""Small terminal UI: summary transcript, live detail toggle, and Unicode input."""
 
 from dataclasses import dataclass
+from datetime import datetime
 import json
 import os
 import re
@@ -155,6 +156,12 @@ class Terminal:
     def round(self, number, model):
         self.model = model
         self._append(TextRecord(f'\n[{model} · 第 {number} 轮]\n', 'notice', True))
+
+    def work_summary(self, elapsed):
+        seconds = max(0, round(elapsed))
+        minutes, seconds = divmod(seconds, 60)
+        duration = f'{minutes}分{seconds:02d}秒' if minutes else f'{seconds}秒'
+        self.notice(f'工作用时 {duration} · 结束于 {datetime.now().astimezone():%Y-%m-%d %H:%M:%S %Z}')
 
     def stream(self, fragment):
         self.check_cancelled()

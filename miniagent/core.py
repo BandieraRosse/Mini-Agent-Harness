@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from .api import APIError
@@ -128,6 +129,13 @@ class Agent:
             index = end
 
     def run(self, prompt):
+        started = time.monotonic()
+        try:
+            return self._run(prompt)
+        finally:
+            self.ui.work_summary(time.monotonic() - started)
+
+    def _run(self, prompt):
         self.ui.check_cancelled()
         if hasattr(self.tools, "bind_session"):
             self.tools.bind_session(self.session)
@@ -140,7 +148,8 @@ class Agent:
                 self.ui.check_cancelled()
                 self.compact()
                 self.ui.round(number, self.client.config.model)
-                display = MessageDisplay(self.ui.stream)
+                pending_jobs = self.tools.completion_blockers() if hasattr(self.tools, 'completion_blockers') else []
+                display = MessageDisplay(self.ui.stream, stream_final=not pending_jobs)
                 response = self.client.complete(
                     self.request_messages(), self.tools.schemas,
                     on_text=display.feed,

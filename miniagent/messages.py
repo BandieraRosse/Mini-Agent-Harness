@@ -45,27 +45,43 @@ def classify(message, end_turn=None):
 
 
 class MessageDisplay:
-    """Stream explicit commentary; hold candidate final/untagged text for admission."""
+    """Hide phase prefixes and stream text when the completion gate allows it."""
 
-    def __init__(self, emit):
+    def __init__(self, emit, *, stream_final=False):
         self.emit = emit
         self.pending = ""
-        self.commentary = False
+        self.stream_final = stream_final
+        self.started = False
+        self.trim = False
 
     def feed(self, text):
-        if self.commentary:
+        if self.started:
+            if self.trim:
+                text = text.lstrip("\r\n ")
+                self.trim = not bool(text)
             self.emit(text)
             return
         self.pending += text
         candidate = self.pending.lstrip()
-        marker = "[commentary]"
-        if candidate.startswith(marker):
-            self.commentary = True
-            self.emit(candidate[len(marker):].lstrip("\r\n "))
+        for marker, phase in MARKERS.items():
+            if candidate.startswith(marker):
+                if phase == 'final_answer' and not self.stream_final:
+                    return
+                self.started = True
+                body = candidate[len(marker):].lstrip("\r\n ")
+                self.trim = not bool(body)
+                self.emit(body)
+                self.pending = ""
+                return
+        # Retain only the phase prefix until it is identifiable, even when
+        # a provider splits it into single-character SSE deltas.
+        if self.stream_final and candidate and not any(marker.startswith(candidate) for marker in MARKERS):
+            self.started = True
+            self.emit(self.pending)
             self.pending = ""
 
     def finish(self, message, *, admitted=True):
-        if admitted and not self.commentary:
+        if admitted and not self.started:
             content = message.get("content") or message.get("refusal")
             if content:
                 self.emit(content)

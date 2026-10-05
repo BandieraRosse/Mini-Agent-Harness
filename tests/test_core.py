@@ -75,6 +75,26 @@ class AgentTests(unittest.TestCase):
         agent.run('work')
         self.assertEqual(observed[:3], ['reply', ('usage', response['usage']), 'tool'])
 
+    def test_final_text_reaches_ui_while_request_is_still_streaming(self):
+        agent = self.agent()
+
+        def complete(messages, tools=None, on_text=None):
+            for part in ('[final', '_answer]', '\n', 'hello', ' world'):
+                on_text(part)
+                if part == 'hello':
+                    self.assertIn('hello', [entry.args[0] for entry in self.ui.stream.call_args_list])
+            return completion('hello world')
+        agent.client.complete = complete
+        self.assertTrue(agent.run('work'))
+        self.assertEqual(''.join(entry.args[0] for entry in self.ui.stream.call_args_list), 'hello world')
+        self.ui.work_summary.assert_called_once()
+
+    def test_interrupted_request_still_gets_work_summary(self):
+        agent = self.agent(KeyboardInterrupt())
+        with self.assertRaises(KeyboardInterrupt):
+            agent.run('work')
+        self.ui.work_summary.assert_called_once()
+
     def test_multiple_tools_are_checkpointed_before_action_then_all_observed(self):
         ids_seen_on_disk = []
 

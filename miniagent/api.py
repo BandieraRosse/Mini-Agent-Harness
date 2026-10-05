@@ -328,7 +328,8 @@ class ChatClient:
 
         Text callbacks are raw model fragments: the UI must redact secrets across chunk
         boundaries. A retry is allowed only before any text, reasoning, or call arrives.
-        Ctrl+C propagates immediately to the application; partial output is discarded.
+        Ctrl+C propagates immediately; no partial response is returned. Text already
+        delivered to the display callback may remain visible.
         """
         self.check_cancelled()
         try:

@@ -82,6 +82,26 @@ class TurnLifecycleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             classify({"role": "assistant", "content": "[final_answer] done"}, False)
 
+    def test_final_stream_displays_before_finish_without_marker_or_duplicates(self):
+        for prefix in ('[final_answer]\n', '[commentary]\n', ''):
+            pieces = []
+            display = MessageDisplay(pieces.append, stream_final=True)
+            for char in prefix:
+                display.feed(char)
+            display.feed('第一段')
+            self.assertEqual(''.join(pieces), '第一段')
+            display.feed(' second')
+            display.finish({'content': '第一段 second'})
+            self.assertEqual(''.join(pieces), '第一段 second')
+
+    def test_blocked_final_stream_remains_hidden(self):
+        pieces = []
+        display = MessageDisplay(pieces.append, stream_final=False)
+        for part in ('[final', '_answer]', '\n', 'premature success'):
+            display.feed(part)
+        display.finish({'content': 'premature success'}, admitted=False)
+        self.assertEqual(pieces, [])
+
     def test_256k_batch_budget_pages_results_without_losing_archive_or_pairing(self):
         calls = [call(str(i), "{}", "search_text") for i in range(4)]
         self.session.messages.extend([{"role": "user", "content": "inspect"}, completion(None, calls)["choices"][0]["message"]])

@@ -85,6 +85,93 @@ class LiveTerminalTests(unittest.TestCase):
     def wait(self, event):
         self.assertTrue(event.wait(3), "expected terminal state was not reached")
 
+    def test_mouse_selection_autoscrolls_and_ctrl_c_copies_without_cancelling_input(self):
+        with self.terminal() as env:
+            ui = env.ui
+            ui.user('用户消息')
+            ui.stream('\n'.join(f'行 {i:03d} model output' for i in range(80)))
+            ui.end_stream()
+            ready, home, selected, copied = (threading.Event() for _ in range(4))
+            captured = []
+
+            def rendered(app, text):
+                info = app.transcript_window.render_info
+                ready.set()
+                if info.visible_line_to_row_col[0][0] == 0:
+                    home.set()
+                state = app.transcript_selection
+                if state['end'] is not None and state['end'] > 600:
+                    selected.set()
+                if captured and state['start'] is None:
+                    copied.set()
+            self.observe(ui, rendered)
+
+            def keys():
+                self.wait(ready)
+                env.pipe.send_text('draft\x1b[1;5H')
+                self.wait(home)
+                app = ui._app
+                position = app.renderer._last_screen.visible_windows_to_write_positions[app.transcript_window]
+                x, y = position.xpos + 1, position.ypos + 1
+                env.pipe.send_text(f'\x1b[<0;{x};{y}M')
+                outside = position.ypos + position.height + 1
+                env.pipe.send_text(f'\x1b[<32;{x};{outside}M')
+                self.wait(selected)
+                env.pipe.send_text(f'\x1b[<0;{x};{outside}m\x03')
+                self.wait(copied)
+                self.assertIn('用户消息', captured[0])
+                self.assertIn('行 020', captured[0])
+                self.assertEqual(app.clipboard.get_data().text, captured[0])
+                env.pipe.send_text('\r')
+            with patch('miniagent.clipboard.copy_text', side_effect=lambda text, output: captured.append(text)):
+                env.send(keys)
+                self.assertEqual(ui.read(), 'draft')
+
+    def test_copy_during_execution_and_buttonless_release_preserve_worker(self):
+        from prompt_toolkit.data_structures import Point
+        from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+        with self.terminal() as env:
+            ui = env.ui
+            ui.stream('中文 answer')
+            ui.end_stream()
+            ready, selected, copied, release = (threading.Event() for _ in range(4))
+            env.releases.append(release)
+
+            def rendered(app, text):
+                ready.set()
+                state = app.transcript_selection
+                if state['start'] is not None and not state['dragging']:
+                    selected.set()
+                if app.clipboard.get_data().text:
+                    copied.set()
+            self.observe(ui, rendered)
+
+            def keys():
+                self.wait(ready)
+                app = ui._app
+
+                def select():
+                    control = app.transcript_window.content
+                    for kind, point, button in (
+                        (MouseEventType.MOUSE_DOWN, Point(2, 0), MouseButton.LEFT),
+                        (MouseEventType.MOUSE_MOVE, Point(0, 0), MouseButton.LEFT),
+                        (MouseEventType.MOUSE_UP, Point(0, 0), MouseButton.NONE),
+                    ):
+                        control.mouse_handler(MouseEvent(point, kind, button, frozenset()))
+                    app.invalidate()
+                app.loop.call_soon_threadsafe(select)
+                self.wait(selected)
+                env.pipe.send_text('\x03')
+                self.wait(copied)
+                self.assertEqual(app.clipboard.get_data().text, '中文')
+                self.assertFalse(ui._cancel_event.is_set())
+                release.set()
+            with patch('miniagent.clipboard.copy_text') as copy:
+                env.send(keys)
+                ui.run_action(lambda: self.wait(release))
+                copy.assert_called_once()
+
     def test_ctrl_t_during_execution_expands_previous_arguments_and_result(self):
         with self.terminal() as env:
             ui = env.ui

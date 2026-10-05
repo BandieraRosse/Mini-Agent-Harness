@@ -9,6 +9,13 @@ from miniagent.ui import Terminal, terminal_text
 
 
 class UITests(unittest.TestCase):
+    def test_work_summary_shows_duration_and_local_end_timestamp(self):
+        terminal = Terminal(Redactor(), plain=True)
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            terminal.work_summary(125)
+        self.assertIn('工作用时 2分05秒', output.getvalue())
+        self.assertRegex(output.getvalue(), r'结束于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}')
+
     def test_usage_totals_and_visible_per_call_counts(self):
         terminal = Terminal(Redactor(), plain=True)
         terminal.context_provider = lambda: (64000, 256000)
