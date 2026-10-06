@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -19,6 +20,52 @@ from urllib.request import urlopen
 MAX_DOWNLOAD = 32 * 1024 * 1024
 MAX_UNPACKED = 128 * 1024 * 1024
 LAUNCHER_MARKER = "# MiniAgent managed launcher"
+WINDOWS = os.name == "nt"
+
+
+def default_prefix():
+    if WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "MiniAgent"
+    return Path.home() / ".local/share/miniagent"
+
+
+def launcher_text(release):
+    if WINDOWS:
+        # UTF-8 also supports non-ASCII user/project paths. Disable delayed
+        # expansion so exclamation marks in paths and arguments survive.
+        paths = [sys.executable, str(release / "agent.py")]
+        if any(any(char in path for char in '\"\r\n') for path in paths):
+            raise ValueError("Unsupported quote or newline in launcher path")
+        python, entry = (path.replace("%", "%%") for path in paths)
+        return ("@echo off\nsetlocal DisableDelayedExpansion\n"
+                "rem " + LAUNCHER_MARKER + "\n"
+                'for /f "tokens=2 delims=:" %%G in (\'chcp\') do set "miniagent_cp=%%G"\n'
+                'chcp 65001 >nul\n'
+                f'"{python}" "{entry}" %*\n'
+                'set "miniagent_exit=%errorlevel%"\n'
+                'chcp %miniagent_cp% >nul\nexit /b %miniagent_exit%\n')
+    return ("#!/bin/sh\n" + LAUNCHER_MARKER + "\nexec " + shlex.quote(sys.executable)
+            + " " + shlex.quote(str(release / "agent.py")) + ' "$@"\n')
+
+
+def path_command(bin_dir):
+    directory = str(Path(bin_dir).expanduser().resolve())
+    if WINDOWS:
+        return "$env:Path = '" + directory.replace("'", "''") + ";' + $env:Path"
+    return "export PATH=" + shlex.quote(directory) + ':"$PATH"'
+
+
+def notify_environment_change():
+    """Tell desktop applications to refresh the persisted user environment."""
+    import ctypes
+    from ctypes import wintypes
+
+    send = ctypes.windll.user32.SendMessageTimeoutW
+    send.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPCWSTR,
+                     wintypes.UINT, wintypes.UINT, ctypes.POINTER(ctypes.c_size_t)]
+    send.restype = wintypes.LPARAM
+    result = ctypes.c_size_t()
+    send(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, ctypes.byref(result))
 
 
 def base_url(value):
@@ -91,7 +138,7 @@ def unpack(archive, destination, version):
 def install(url, prefix, bin_dir):
     url = base_url(url)
     prefix, bin_dir = Path(prefix).expanduser().resolve(), Path(bin_dir).expanduser().resolve()
-    launcher = bin_dir / "miniagent"
+    launcher = bin_dir / ("miniagent.cmd" if WINDOWS else "miniagent")
     if launcher.exists() or launcher.is_symlink():
         if launcher.is_symlink() or not launcher.is_file():
             raise ValueError(f"Existing command is not managed by MiniAgent: {launcher}")
@@ -123,11 +170,10 @@ def install(url, prefix, bin_dir):
             (extracted / ".release-sha256").write_text(manifest["sha256"], encoding="ascii")
             extracted.rename(release)
         bin_dir.mkdir(parents=True, exist_ok=True)
-        text = ("#!/bin/sh\n" + LAUNCHER_MARKER + "\nexec " + shlex.quote(sys.executable)
-                + " " + shlex.quote(str(release / "agent.py")) + ' "$@"\n')
+        text = launcher_text(release)
         fd, name = tempfile.mkstemp(prefix=".miniagent-", dir=bin_dir)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\r\n" if WINDOWS else "\n") as handle:
                 handle.write(text)
             os.chmod(name, 0o755)
             os.replace(name, launcher)
@@ -138,6 +184,23 @@ def install(url, prefix, bin_dir):
 
 def add_to_path(bin_dir):
     """Append one idempotent PATH line; do not rewrite existing shell settings."""
+    if WINDOWS:
+        import winreg
+
+        directory = str(Path(bin_dir).expanduser().resolve())
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                                winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                value, kind = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                value, kind = "", winreg.REG_EXPAND_SZ
+            if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+                raise ValueError("User PATH is not a string")
+            normalize = lambda path: ntpath.normcase(ntpath.normpath(os.path.expandvars(path)))
+            if normalize(directory) not in {normalize(part) for part in value.split(";") if part}:
+                winreg.SetValueEx(key, "Path", 0, kind, value + (";" if value and not value.endswith(";") else "") + directory)
+        notify_environment_change()
+        return path_command(bin_dir)
     line = "export PATH=" + shlex.quote(str(Path(bin_dir).expanduser().resolve())) + ':"$PATH"'
     shell = Path(os.environ.get("SHELL", "sh")).name
     files = [Path.home() / ".profile"]
@@ -154,9 +217,9 @@ def add_to_path(bin_dir):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", help="Distribution service URL, e.g. http://server:8765")
-    parser.add_argument("--prefix", type=Path, default=Path.home() / ".local/share/miniagent")
-    parser.add_argument("--bin-dir", type=Path, default=Path.home() / ".local/bin")
-    parser.add_argument("--add-to-path", action="store_true", help="Add the command directory to shell startup files")
+    parser.add_argument("--prefix", type=Path, default=default_prefix())
+    parser.add_argument("--bin-dir", type=Path, default=default_prefix() / "bin" if WINDOWS else Path.home() / ".local/bin")
+    parser.add_argument("--add-to-path", action="store_true", help="Add the command directory to user PATH or shell startup files")
     args = parser.parse_args(argv)
     if sys.version_info < (3, 10):
         parser.exit(1, "MiniAgent requires Python 3.10 or newer\n")
@@ -168,13 +231,13 @@ def main(argv=None):
     if args.add_to_path:
         try:
             line = add_to_path(args.bin_dir)
-            print("PATH configured for new shells. For this shell, run:\n  " + line)
+            print("User PATH configured. For this shell, run:\n  " + line)
         except (OSError, ValueError):
-            print("Installed successfully; shell configuration could not be updated. Run:\n  export PATH="
-                  + shlex.quote(str(launcher.parent)) + ':"$PATH"')
+            print("Installed successfully; PATH could not be configured. Run:\n  " + path_command(launcher.parent))
     elif str(launcher.parent) not in os.environ.get("PATH", "").split(os.pathsep):
-        print("Add the command to this shell:\n  export PATH=" + shlex.quote(str(launcher.parent)) + ':"$PATH"')
-    print("Run: miniagent -C /path/to/project\nThe API key is requested privately on first start.")
+        print("Add the command to this shell:\n  " + path_command(launcher.parent))
+    print("Run: miniagent -C " + (r"C:\path\to\project" if WINDOWS else "/path/to/project")
+          + "\nThe API key is requested privately on first start.")
     return 0
 
 

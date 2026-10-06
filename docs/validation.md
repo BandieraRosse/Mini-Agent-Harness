@@ -2,6 +2,14 @@
 
 [文档索引](README.md) · [仓库首页](../README.md) · [Agent 开发入口](../AGENTS.md)
 
+## Windows 分发安装入口（2026-10-06）
+
+新增 `/install.ps1` 和 PowerShell 一键安装命令；共用 Python 安装器完成发布包大小、SHA-256 校验和解包，Windows 生成 `miniagent.cmd`，支持用户 PATH 持久化及当前 PowerShell PATH 更新。服务首页及安装文档同步提供入口；服务器更新脚本后需要重启分发服务。
+
+Linux / Python 3.12.3，使用仓库 `.venv/bin/python` 最终完整回归：217 项，214 项通过，3 项跳过（执行沙箱禁止 `socket.shutdown`、Windows 默认 PowerShell、原生 Windows 启动器测试），无失败。新增离线验证覆盖 Windows 默认安装目录、包含中文/空格/百分号/感叹号的启动路径生成、重复安装、校验失败保留旧启动命令、拒绝覆盖非托管命令、用户 PATH 保留及大小写不敏感去重、Linux 启动命令兼容。前一轮完整回归在未修改的 `ui.py` 终端清理阶段出现一次 `loop` 为 `None` 的错误，复跑未再出现；本次未修改该终端行为。
+
+沙箱外临时启动仅监听 loopback 的分发服务，实际确认首页包含 Windows 命令，三个安装脚本端点内容与源文件一致，仓库文件及路径穿越请求返回 404；通过 HTTP 下载、安装已有发布包并运行 `--version`，返回 `MiniAgent 0.3.1`。验证后关闭临时服务。语法检查、PowerShell 内嵌 Python 解析、文档链接及 `git diff --check` 通过。当前环境没有 PowerShell 或原生 Windows，未执行 PowerShell 引导脚本、真实注册表写入、原生 `.cmd` 参数传递及 PATH 广播；没有更新用户已部署的服务。
+
 ## 环境能力检查与行尾复制（2026-10-05）
 
 API 取消测试先直接探测本地 socket pair 和 `socket.shutdown`；仅在 `EPERM` / `EACCES` 权限限制下跳过，并在注释和跳过信息中说明环境限制与功能错误的区别。其他异常仍报错，正常环境仍执行 stream/json/models 三条取消路径的断言。

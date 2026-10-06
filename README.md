@@ -47,7 +47,7 @@ miniagent --provider openai --base-url https://your-server:8443/v1 --model your-
 
 隐藏输入 API key 后可选择长期保存或仅本次使用。`/model` 查询模型列表并选择，`/model 模型名称` 直接切换。已移除 ChatGPT 登录、账号标签和 OAuth 依赖。
 
-## 分发到 Linux 服务器
+## 分发到 Linux 和 Windows
 
 项目附带只依赖 Python 标准库的分发服务。先在本项目目录运行：
 
@@ -64,6 +64,13 @@ miniagent -C /path/to/project
 ```
 
 发布包约 630 KiB，附带纯 Python 终端依赖。重复安装命令即可升级；支持 wget、指定安装目录、离线构建和后台托管，见 [分发与安装](docs/distribution.md)。
+
+Windows 在 PowerShell 中执行（需要 Python 3.10+，无需 sh 或管理员权限）：
+
+```powershell
+$server='http://SERVER:8765'; & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "$server/install.ps1").Content)) -Url $server -AddToPath
+miniagent -C "C:\path\to\project"
+```
 
 ## 能做什么
 
@@ -88,7 +95,7 @@ miniagent -C /path/to/project
 - [开发指南](docs/development.md)：本地开发、验证和文档维护规则。
 - [使用指南](docs/usage.md)：安装、密钥、模型、输入、恢复和排错。
 - [终端交互](docs/terminal.md)：摘要/详情、快捷键、中文编辑及 Codex 源码参考。
-- [分发与安装](docs/distribution.md)：标准库分发服务、Linux 一行安装、更新和离线使用。
+- [分发与安装](docs/distribution.md)：标准库分发服务、Linux/Windows 一行安装、更新和离线使用。
 - [架构](docs/architecture.md)：上下文、Agent 循环、检查点与权限边界。
 - [工具参考](docs/tools.md)：参数、分页、补丁及执行限制。
 - [验收记录](docs/validation.md)：自动测试与真实 API 验证。

@@ -21,7 +21,7 @@ python3 scripts/distribute.py --build --bind 0.0.0.0 --port 8765
 python3 scripts/distribute.py --bind 0.0.0.0 --port 8765
 ```
 
-服务只提供 `/install.sh`、`/install.py`、`/manifest.json` 和当前发布包，根路径显示使用说明。项目文件、密钥、会话和目录列表不会作为下载内容提供。服务是公开下载服务，不带登录；在公网使用时，可放在已有 HTTPS 反向代理后，客户端填写对应 HTTPS 地址。
+服务只提供 `/install.sh`、`/install.ps1`、`/install.py`、`/manifest.json` 和当前发布包，根路径显示 Linux 和 Windows 安装命令。项目文件、密钥、会话和目录列表不会作为下载内容提供。服务是公开下载服务，不带登录；在公网使用时，可放在已有 HTTPS 反向代理后，客户端填写对应 HTTPS 地址。
 
 ## 2. 新 Linux 服务器安装
 
@@ -64,7 +64,30 @@ PYTHON=/usr/bin/python3.11 sh install-miniagent.sh http://SERVER:8765 \
 
 安装命令会保留实际使用的解释器路径。未传 `--add-to-path` 时不修改 Shell 配置，会打印当前终端的 PATH 命令。Python 低于 3.10 会提示退出，不自动升级系统 Python。
 
-## 3. 发布更新
+## 3. Windows 一键安装
+
+Windows PowerShell 5.1 或 PowerShell 7 中执行，把 `SERVER` 替换为分发机器地址：
+
+```powershell
+$server='http://SERVER:8765'; & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "$server/install.ps1").Content)) -Url $server -AddToPath
+miniagent -C "C:\path\to\project"
+```
+
+需要已安装 Python 3.10+，无需 sh、Git、pip 或管理员权限。入口依次检测 `py -3`、`python`、`python3`；也可用 `$env:PYTHON` 指定解释器完整路径。下载发布包后与 Linux 共用大小、SHA-256 校验及解包流程。
+
+程序及依赖默认位于 `%LOCALAPPDATA%\MiniAgent\releases\<版本>-<摘要>\`，启动命令为 `%LOCALAPPDATA%\MiniAgent\bin\miniagent.cmd`，保留安装时使用的 Python 解释器。`-AddToPath` 将命令目录加入用户 PATH，保留原有内容且重复执行不重复添加，同时更新当前 PowerShell 的 PATH。已有终端窗口仍需重新打开或手动更新 PATH；部分终端宿主需退出并重新启动。启动后用 `/settings` 配置 API，配置与安装版本分开保存。
+
+自定义安装和启动命令目录：
+
+```powershell
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing "$server/install.ps1").Content)) -Url $server -Prefix "$env:USERPROFILE\apps\MiniAgent" -BinDir "$env:USERPROFILE\bin" -AddToPath
+```
+
+不传 `-AddToPath` 时不修改用户 PATH，安装器打印当前 PowerShell 的设置命令。直接运行 `install.py` 也支持 Windows，参数为 `--prefix`、`--bin-dir`、`--add-to-path`；子进程无法修改当前 PowerShell 的环境，需执行其打印的 PATH 命令。
+
+已有分发服务需更新服务器上的 `scripts/` 并重启服务，才能开放新增的 `/install.ps1` 路由；仅重建发布包不会更新运行中的路由代码。
+
+## 4. 发布更新
 
 在分发机器上更新源码，再构建一次：
 
@@ -76,7 +99,7 @@ python3 scripts/build_release.py
 
 构建步骤仅打包源码白名单与两个依赖，版本来自 `miniagent/__init__.py`。`manifest.json` 记录版本、最低 Python 版本、文件名、大小和 SHA-256。发布包不包含本地 `.venv` 或操作系统相关的原生扩展。
 
-## 4. 离线构建或安装
+## 5. 离线构建或安装
 
 若 `dist/wheels/` 已有完整缓存，可直接按通常方式使用 `--build`，无需指定 `--wheel-dir`。后者用于明确指定外部 wheel 目录，不会联网下载或写入默认缓存。
 
@@ -96,7 +119,7 @@ python3 -m tarfile -e miniagent-0.3.1.tar.gz "$HOME/apps"
 python3 "$HOME/apps/miniagent-0.3.1/agent.py" -C /path/to/project
 ```
 
-## 5. 作为后台服务
+## 6. 作为后台服务
 
 分发程序以前台方式运行，可交给现有进程管理器。Linux 使用 systemd 用户服务时，例如创建 `~/.config/systemd/user/miniagent-distribute.service`：
 

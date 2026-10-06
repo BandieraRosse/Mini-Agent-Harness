@@ -84,10 +84,13 @@ def create_server(
                     payload = (
                         "MiniAgent distribution\n\n"
                         "curl -fsSL http://HOST:8765/install.sh | sh -s -- http://HOST:8765\n\n"
-                        "Available: /install.sh /install.py /manifest.json and the release archive.\n"
+                        "Windows PowerShell:\n"
+                        "$server='http://HOST:8765'; & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing \""
+                        "$server/install.ps1\").Content)) -Url $server -AddToPath\n\n"
+                        "Available: /install.sh /install.ps1 /install.py /manifest.json and the release archive.\n"
                     ).encode("utf-8")
                     content_type = "text/plain; charset=utf-8"
-                elif route in ("/install.sh", "/install.py"):
+                elif route in ("/install.sh", "/install.ps1", "/install.py"):
                     file_path = _regular_file(scripts, route[1:])
                     content_type = "text/plain; charset=utf-8"
                 else:
