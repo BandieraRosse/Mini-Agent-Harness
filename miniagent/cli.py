@@ -160,7 +160,11 @@ def main(argv=None):
             return 0 if ui.run_action(lambda: agent.run(task), client=client, processes=processes) else 1
         while True:
             try:
-                prompt = ui.read()
+                try:
+                    prompt = ui.read()
+                except KeyboardInterrupt:
+                    # Cancelling input is separate from cancelling running work.
+                    continue
                 if not prompt:
                     continue
                 if prompt.startswith("/"):
@@ -315,7 +319,7 @@ def main(argv=None):
                 processes = ProcessManager(workspace, ui.approve, redact, secrets=(key,))
                 registry = ToolRegistry(workspace, processes, ui.approve, redact, lambda: ui.approval)
                 agent.tools = registry
-                ui.notice("当前工作已中断；可以继续输入。后台任务已停止。")
+                ui.notice("当前工作已中断；可以继续输入。")
             except EOFError:
                 session.save()
                 ui.print()

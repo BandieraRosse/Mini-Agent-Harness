@@ -367,6 +367,12 @@ def build_app(terminal, styles):
             terminal._cancel()
         elif terminal._request and terminal._request['kind'] == 'read' and terminal.detailed and event.key_sequence[-1].key == 'escape':
             terminal.toggle_details()
+        elif terminal._request and terminal._request['kind'] == 'read':
+            if event.key_sequence[-1].key == 'c-c' and not buffer.text:
+                finish(error=EOFError())
+            else:
+                buffer.reset()
+                terminal._changed()
         elif terminal._request:
             finish(error=KeyboardInterrupt() if terminal._request['kind'] in {'read', 'ask'} else None)
 
@@ -421,10 +427,20 @@ def build_app(terminal, styles):
     def footer():
         if selected_text():
             return f' 已选中 {len(selected_text())} 字符 · Ctrl+C 复制并取消选择 · Esc 取消选择 · PgUp/PgDn 跨页'
-        state = '正在停止…' if terminal._stopping else '执行中' if terminal._busy else '输入'
+        if terminal._stopping:
+            state = '正在停止…'
+        elif terminal._approval:
+            state = '等待审批'
+        elif terminal._busy:
+            state = '正在执行工具' if terminal.current_tool else '正在请求模型'
+        else:
+            state = '等待输入'
         if choosing():
             return ' ↑↓ 选择 · Enter 确认 · Esc 取消 · PgUp/PgDn 翻页'
-        return f' {state} · Ctrl+T 摘要/详情 · PgUp/PgDn 翻页 · Ctrl+End 跟随 · Ctrl+C 取消'
+        cancel_hint = ('Ctrl+C / Esc 中断' if terminal._busy else
+                       'Ctrl+C / Esc 取消' if terminal._request and terminal._request['kind'] != 'read' else
+                       'Ctrl+C 清空输入' if buffer.text else 'Ctrl+C 退出')
+        return f' {state} · {cancel_hint} · Ctrl+T 摘要/详情 · PgUp/PgDn 翻页 · Ctrl+End 跟随'
 
     root = FloatContainer(HSplit([
         Window(FormattedTextControl(lambda: f' MiniAgent · {terminal.model}'), height=1),

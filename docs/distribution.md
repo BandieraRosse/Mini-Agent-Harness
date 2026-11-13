@@ -66,13 +66,27 @@ PYTHON=/usr/bin/python3.11 sh install-miniagent.sh http://SERVER:8765 \
 
 ### Android / Termux
 
+同一条安装命令也用于更新，保留用户配置和项目会话；更新后退出旧 MiniAgent 并重新启动。入口开始以黄色提示包升级和下载可能较慢，建议使用加速器或更换软件源；安装完成以绿色提示重启终端并运行 `miniagent`。重定向输出、`TERM=dumb` 或设置 `NO_COLOR` 时使用无色文字。
+
 云服务器更新代码、构建发布包并重启分发服务后，在手机 Termux 输入这一行即可安装或升级（默认分发端口 8765）：
 
 ```bash
 curl -fsSL http://124.221.221.10:8765/install-termux.sh | sh
 ```
 
-专用入口自动更新包索引、安装 Python/curl/termux-api 命令包并安装 MiniAgent、配置 PATH。完成后新开一个 Termux 会话，输入 `miniagent` 启动；首次配置模型和密钥。Termux:API Android 应用仍需单独安装，见下面第 1 步。若当前 Termux 没有 curl，先执行 `pkg install curl`。服务器需开放实际使用的分发端口；此入口须部署后才能使用，尚未验证公网连通性。其他地址可传参：`curl -fsSL https://example.com/install-termux.sh | sh -s -- https://example.com`。
+专用入口使用 apt 更新包索引并完整升级已有 Termux 包，再安装 Python/curl/termux-api 命令包并安装 MiniAgent、配置 PATH。完成后新开一个 Termux 会话，输入 `miniagent` 启动；首次配置模型和密钥。Termux:API Android 应用仍需单独安装，见下面第 1 步。若当前 Termux 没有 curl，先执行 `apt update && apt full-upgrade && apt install curl`。服务器需开放实际使用的分发端口；此入口须部署后才能使用，尚未验证公网连通性。其他地址可传参：`curl -fsSL https://example.com/install-termux.sh | sh -s -- https://example.com`。
+
+若出现 `CANNOT LINK EXECUTABLE "curl": cannot locate symbol "SSL_..."`，说明 libcurl 与实际加载的 OpenSSL 库不匹配，常见于部分升级。先直接用 apt 修复，避免 pkg 的镜像检查调用已失效的 curl：
+
+```bash
+apt update
+apt full-upgrade
+curl --version
+```
+
+每步成功后再执行下一步。若完整升级后仍报相同错误，执行 `apt install --reinstall openssl libcurl curl`，再检查 `curl --version`。若 apt 报错，应保留完整输出排查软件源或依赖，不能继续安装。恢复后重新运行安装命令，无需清空 Termux 数据。此流程尚未在 Android 真机验证。
+
+一行安装通过管道运行，包操作不能等待键盘输入。入口先用 `dpkg --force-confold --configure --pending` 恢复未完成的配置，再执行完整升级和依赖安装；这些步骤设置非交互模式，并向 dpkg 传递保留已有配置文件的选项，避免 `openssl.cnf` 冲突导致 `end of file on stdin at conffile prompt`。发生该错误后，只要 curl 能启动，即可重新执行同一行安装命令恢复。若 curl 也无法启动，先手动执行 `dpkg --force-confold --configure --pending`，再执行上面的 apt 恢复步骤。其他包错误会停止安装，需根据输出排查。
 
 Android 适配目标是 Termux 中的 Python 3.10+ 终端环境，无需 root、Ubuntu/proot 或编译器。发布包附带纯 Python 依赖，可复用 Linux 安装器。安装和项目目录放在 Termux 私有 HOME 下；文件创建使用硬链接，不应假定共享存储支持相同的文件系统能力。
 
@@ -80,8 +94,9 @@ Android 适配目标是 Termux 中的 Python 3.10+ 终端环境，无需 root、
 2. 在 Termux 准备 Python、下载工具及剪贴板命令：
 
 ```bash
-pkg update
-pkg install python curl termux-api
+apt update
+apt full-upgrade
+apt install python curl termux-api
 python --version
 ```
 

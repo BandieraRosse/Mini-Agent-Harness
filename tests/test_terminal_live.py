@@ -369,6 +369,38 @@ class LiveTerminalTests(unittest.TestCase):
             self.assertIsNone(env.ui._approval)
             self.assertTrue(env.ui._app.is_running)
 
+    def test_idle_ctrl_c_exits_with_empty_draft(self):
+        with self.terminal() as env:
+            ready = threading.Event()
+            self.observe(env.ui, lambda app, text: ready.set() if env.ui._request else None)
+            def keys():
+                self.wait(ready)
+                env.pipe.send_text("\x03")
+            env.send(keys)
+            with self.assertRaises(EOFError):
+                env.ui.read()
+            self.assertFalse(env.ui._busy)
+
+    def test_idle_cancel_clears_draft_and_stays_in_input(self):
+        for key in ("\x03", "\x1b"):
+            with self.subTest(key=repr(key)), self.terminal() as env:
+                drafted, cleared = threading.Event(), threading.Event()
+                def rendered(app, text):
+                    if env.ui.editor.default_buffer.text == 'draft':
+                        drafted.set()
+                    if drafted.is_set() and not env.ui.editor.default_buffer.text:
+                        cleared.set()
+                self.observe(env.ui, rendered)
+                def keys():
+                    env.pipe.send_text('draft')
+                    self.wait(drafted)
+                    env.pipe.send_text(key)
+                    self.wait(cleared)
+                    env.pipe.send_text('next\r')
+                env.send(keys)
+                self.assertEqual(env.ui.read(), 'next')
+                self.assertFalse(env.ui._busy)
+
     def test_picker_arrows_enter_and_escape(self):
         with self.terminal() as env:
             options = [("first", "第一个 First"), ("second", "第二个 Second")]

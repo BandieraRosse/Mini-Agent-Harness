@@ -62,6 +62,16 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse((self.workspace / ".miniagent").exists())
 
+    def test_cancelled_input_does_not_stop_background_work(self):
+        with patch('miniagent.cli.Terminal.read', side_effect=[KeyboardInterrupt(), '/quit']), \
+                patch('miniagent.cli.ProcessManager.close') as close:
+            code, output, requests, _ = self.invoke(['--no-save'])
+        self.assertEqual(code, 0)
+        self.assertEqual(requests, [])
+        self.assertNotIn('已中断', output)
+        self.assertNotIn('后台任务已停止', output)
+        close.assert_called_once()  # Final exit cleanup only.
+
     def test_noninteractive_denies_mutation_and_shell_but_returns_observations(self):
         calls = [{"id": "file", "type": "function", "function": {"name": "create_file", "arguments": '{"path":"new.txt","content":"data"}'}},
                  {"id": "shell", "type": "function", "function": {"name": "run_command", "arguments": '{"command":"echo should-not-run"}'}}]

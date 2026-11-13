@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -106,6 +107,61 @@ class InstallerTests(unittest.TestCase):
             text = self.installer.launcher_text(self.root)
         self.assertTrue(text.startswith("#!" + shell + "\n"))
         self.assertIn(' "$@"', text)
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("sh"), "Requires POSIX shell")
+    def test_termux_bootstrap_upgrades_before_curl_and_stops_on_failure(self):
+        commands = self.root / "commands"
+        commands.mkdir()
+        log = self.root / "calls"
+        helper = (
+            "#!" + sys.executable + "\n"
+            "import os, pathlib, sys\n"
+            "name = pathlib.Path(sys.argv[0]).name\n"
+            "if os.environ.get('DEBIAN_FRONTEND') != 'noninteractive': sys.exit(71)\n"
+            "with open(os.environ['CALL_LOG'], 'a') as f:\n"
+            "    f.write(name + ' ' + ' '.join(sys.argv[1:]) + '\\n')\n"
+            "if name == 'dpkg':\n"
+            "    if '--force-confold' not in sys.argv: sys.exit(72)\n"
+            "    sys.exit(int(os.environ['CONFIGURE_STATUS']))\n"
+            "if name == 'apt' and sys.argv[1] in ('full-upgrade', 'install'):\n"
+            "    if 'Dpkg::Options::=--force-confold' not in sys.argv: sys.exit(73)\n"
+            "if name == 'apt' and sys.argv[1] == 'full-upgrade':\n"
+            "    sys.exit(int(os.environ['UPGRADE_STATUS']))\n"
+            "if name == 'curl':\n"
+            "    pathlib.Path(sys.argv[-1]).write_text('exit 0\\n')\n"
+        )
+        for name in ("pkg", "dpkg", "apt", "curl"):
+            command = commands / name
+            command.write_text(helper, encoding="utf-8")
+            command.chmod(0o755)
+        for configure_status, status in ((0, 0), (0, 9), (8, 0)):
+            with self.subTest(configure_status=configure_status, upgrade_status=status):
+                log.write_text("", encoding="utf-8")
+                env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ["PATH"],
+                           PREFIX=str(self.root), CALL_LOG=str(log), UPGRADE_STATUS=str(status),
+                           CONFIGURE_STATUS=str(configure_status))
+                result = subprocess.run(["sh", str(ROOT / "scripts/install-termux.sh"),
+                                         "https://example.test"], env=env, capture_output=True,
+                                        text=True, timeout=10)
+                calls = log.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(result.returncode, configure_status or status, result.stderr)
+                self.assertIn('速度可能较慢', result.stdout)
+                self.assertNotIn('\x1b[', result.stdout)
+                if configure_status or status:
+                    self.assertNotIn('安装完毕', result.stdout)
+                else:
+                    self.assertIn('安装完毕！重启终端后，输入 miniagent 即可使用。', result.stdout)
+                self.assertEqual(calls[0], "dpkg --force-confold --configure --pending")
+                if configure_status:
+                    self.assertEqual(len(calls), 1)
+                    continue
+                self.assertEqual(calls[1:3], ["apt update -y",
+                                            "apt full-upgrade -y -o Dpkg::Options::=--force-confold"])
+                if status:
+                    self.assertEqual(len(calls), 3)
+                else:
+                    self.assertEqual(calls[3], "apt install -y -o Dpkg::Options::=--force-confold python curl termux-api")
+                    self.assertTrue(calls[4].startswith("curl -fsSL https://example.test/install.sh -o "))
 
     def test_windows_user_path_is_preserved_and_case_insensitively_idempotent(self):
         registry = MagicMock()

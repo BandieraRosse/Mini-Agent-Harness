@@ -206,7 +206,7 @@ class UITests(unittest.TestCase):
             pipe.send_text("first\x1b\rsecond\r")
             self.assertEqual(terminal.read(), "first\nsecond")
             pipe.send_text("\x03")
-            with self.assertRaises(KeyboardInterrupt):
+            with self.assertRaises(EOFError):
                 terminal.read()
             pipe.send_text("continue\r")
             self.assertEqual(terminal.read(), "continue")
