@@ -73,15 +73,11 @@ class MessageDisplay:
                 self.emit(body)
                 self.pending = ""
                 return
-        # Retain only the phase prefix until it is identifiable, even when
-        # a provider splits it into single-character SSE deltas.
-        if self.stream_final and candidate and not any(marker.startswith(candidate) for marker in MARKERS):
-            self.started = True
-            self.emit(self.pending)
-            self.pending = ""
+        # Untagged text stays buffered until native metadata or tool calls
+        # establish a phase. Never show a draft that will require repair.
 
     def finish(self, message, *, admitted=True):
-        if admitted and not self.started:
+        if admitted and message.get('phase') and not self.started:
             content = message.get("content") or message.get("refusal")
             if content:
                 self.emit(content)

@@ -76,6 +76,7 @@ class Terminal:
         self._busy = False
         self._cancel = None
         self._closed = False
+        self._processes = None
         if self.tty and not plain:
             try:
                 from prompt_toolkit import PromptSession
@@ -197,6 +198,8 @@ class Terminal:
         if not isinstance(arguments, dict):
             arguments = {'arguments': arguments} if arguments is not None else {}
         self.current_tool = ToolRecord(self._safe(name), self.redact.value(arguments))
+        if name in {'poll_command', 'cancel_command'} and self._processes is not None:
+            self._track_job(arguments.get('job_id'))
         self._append(self.current_tool)
         if self.editor is None:
             self._write(tool_fragments(self.current_tool, detailed=self.detailed))
@@ -207,11 +210,36 @@ class Terminal:
                 self.current_tool = ToolRecord('tool', {})
                 self.events.append(self.current_tool)
             self.current_tool.result = self.redact.value(result)
+            self.current_tool.live_status = None
+            if result.get('complete'):
+                self.current_tool.status_provider = None
             record = self.current_tool
             self.current_tool = None
             self._changed()
         if self.editor is None:
             self._write([*tool_fragments(record, detailed=self.detailed), ('', '\n')])
+
+    def _track_job(self, job_id):
+        with self._lock:
+            if self.current_tool is not None and self._processes is not None:
+                manager = self._processes
+                self.current_tool.status_provider = lambda: manager.display_status(job_id)
+
+    def refresh_jobs(self):
+        """Refresh presentation only; tool observations remain immutable."""
+        with self._lock:
+            changed = False
+            for record in self.events:
+                if not isinstance(record, ToolRecord) or record.status_provider is None:
+                    continue
+                status = record.status_provider()
+                if status and status != record.live_status:
+                    record.live_status = status
+                    changed = True
+                if not status or status.get('complete'):
+                    record.status_provider = None
+            if changed:
+                self._changed()
 
     def usage(self, usage):
         counts = {
@@ -323,6 +351,8 @@ class Terminal:
             client.cancel_event = event
         if processes is not None:
             processes.cancel_event = event
+            self._processes = processes
+            processes.on_started = self._track_job
 
         def cancel():
             if event.is_set():
@@ -363,6 +393,8 @@ class Terminal:
                     client.cancel_event = None
                 if processes is not None:
                     processes.cancel_event = None
+                    processes.on_started = None
+                self._processes = None
 
     def view_history(self):
         if self.editor is not None:
@@ -405,7 +437,9 @@ class Terminal:
             if role == 'user':
                 self.events.append(TextRecord('› ' + self._safe(message['content']) + '\n\n', 'user'))
             elif role == 'assistant':
-                if message.get('completion_deferred'):
+                if message.get('phase_missing'):
+                    self.events.append(TextRecord('曾隐藏缺少阶段标记的回复草稿。\n', 'notice'))
+                elif message.get('completion_deferred'):
                     self.events.append(TextRecord('必需任务结果未齐，曾暂缓最终答复。\n', 'notice'))
                 elif message.get('content'):
                     self.events.append(TextRecord(self._safe(message['content']) + '\n\n'))

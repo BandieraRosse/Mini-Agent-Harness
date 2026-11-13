@@ -331,6 +331,9 @@ class ProcessManager:
             job.monitor = threading.Thread(target=self._watch, args=(job,), daemon=True)
             job.reader.start()
             job.monitor.start()
+            on_started = getattr(self, 'on_started', None)
+            if on_started is not None:
+                on_started(job_id)
             self._wait(job, 0 if background else yield_time_ms)
             if cancel_event is not None and cancel_event.is_set():
                 raise KeyboardInterrupt()
@@ -522,6 +525,21 @@ class ProcessManager:
         return [{"job_id": job.job_id, "status": "running" if not job.done.is_set() else "unobserved",
                  "next_action": "Call poll_command to observe completion and the exit code."}
                 for job in self._jobs.values() if job.purpose == "task" and not job.observed_complete]
+
+    def display_status(self, job_id: str) -> dict:
+        """UI-only snapshot: never consume output or acknowledge completion."""
+        job = self._jobs.get(job_id)
+        if job is None:
+            return {}
+        with job.lock:
+            complete = job.done.is_set()
+            elapsed = (job.ended if job.ended is not None else time.monotonic()) - job.started
+            status = (job.reason or 'completed') if complete else 'running'
+            code = job.process.returncode if complete else None
+            return {'job_id': job_id, 'status': status, 'complete': complete,
+                    'exit_code': code, 'elapsed': round(elapsed, 1), 'timeout': job.timeout,
+                    'remaining': round(max(0, job.timeout - elapsed), 1) if not complete else 0,
+                    'ok': job.capture_error is None and status not in {'timed_out', 'cancelled'} and code in (None, 0)}
 
     def _cancel(self, job: _Job) -> None:
         if job.done.is_set():

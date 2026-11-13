@@ -9,6 +9,81 @@ from miniagent.ui import Terminal, terminal_text
 
 
 class UITests(unittest.TestCase):
+    def test_restore_hides_phase_missing_draft(self):
+        terminal = Terminal(Redactor(), plain=True)
+        terminal.restore([{'role': 'assistant', 'content': 'hidden draft', 'phase_missing': True},
+                          {'role': 'assistant', 'content': 'accepted', 'phase': 'final_answer'}])
+        shown = ''.join(text for _, text in terminal.fragments())
+        self.assertNotIn('hidden draft', shown)
+        self.assertIn('accepted', shown)
+
+    @unittest.skipUnless(importlib.util.find_spec('prompt_toolkit'), 'prompt-toolkit is not installed')
+    def test_enhanced_job_timer_refreshes_without_model_poll(self):
+        import threading
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.input import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+        from miniagent.terminal_app import ensure_app
+
+        with create_pipe_input() as pipe:
+            def factory(**kwargs):
+                return PromptSession(input=pipe, output=DummyOutput(), **kwargs)
+            with patch('sys.stdin.isatty', return_value=True), patch(
+                    'prompt_toolkit.PromptSession', side_effect=factory):
+                terminal = Terminal(Redactor())
+            finished = threading.Event()
+            calls = []
+            terminal.tool('run_command', {'command': 'timer probe'})
+            record = terminal.current_tool
+
+            def snapshot():
+                calls.append(len(calls) + 1)
+                complete = len(calls) >= 2
+                if complete:
+                    finished.set()
+                return {'ok': True, 'status': 'completed' if complete else 'running',
+                        'complete': complete, 'elapsed': len(calls), 'timeout': 10,
+                        'remaining': 0 if complete else 9, 'exit_code': 0 if complete else None}
+
+            record.status_provider = snapshot
+            try:
+                ensure_app(terminal, {})
+                self.assertTrue(finished.wait(3))
+            finally:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    terminal.close()
+            self.assertTrue(record.live_status['complete'])
+            self.assertIsNone(record.status_provider)
+            self.assertIn('完成', ''.join(text for _, text in terminal.fragments()))
+
+    def test_live_job_refresh_preserves_tool_result_and_completion_gate(self):
+        import tempfile
+        from pathlib import Path
+        from miniagent.processes import ProcessManager
+        from tests.test_processes import python_command
+
+        terminal = Terminal(Redactor(), plain=True)
+        with tempfile.TemporaryDirectory() as root, ProcessManager(Path(root), lambda *a: True, lambda x: x) as manager:
+            terminal._processes = manager
+            manager.on_started = terminal._track_job
+            with contextlib.redirect_stdout(io.StringIO()):
+                terminal.tool('run_command', {'command': 'test'})
+                result = manager.run(python_command('import time; time.sleep(0.3); raise SystemExit(3)'), yield_time_ms=0)
+                terminal.result(result)
+            record = terminal.events[0]
+            terminal.refresh_jobs()
+            self.assertIn('执行中', ''.join(text for _, text in terminal.fragments()))
+            self.assertTrue(manager._jobs[result['job_id']].done.wait(5))
+            terminal.refresh_jobs()
+            shown = ''.join(text for _, text in terminal.fragments())
+            self.assertIn('失败', shown)
+            self.assertIn('exit 3', shown)
+            self.assertEqual(record.result, result)
+            self.assertEqual(manager.completion_blockers()[0]['status'], 'unobserved')
+            self.assertIsNone(record.status_provider)
+            manager.poll(result['job_id'])
+            self.assertEqual(manager.completion_blockers(), [])
+
     def test_work_summary_shows_duration_and_local_end_timestamp(self):
         terminal = Terminal(Redactor(), plain=True)
         with contextlib.redirect_stdout(io.StringIO()) as output:

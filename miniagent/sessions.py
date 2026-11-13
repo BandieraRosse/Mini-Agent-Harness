@@ -79,6 +79,8 @@ def validate_and_repair(messages):
             raise ValueError("Invalid stored assistant phase")
         if 'completion_deferred' in message and (message['role'] != 'assistant' or type(message['completion_deferred']) is not bool):
             raise ValueError('Invalid stored completion state')
+        if 'phase_missing' in message and (message['role'] != 'assistant' or type(message['phase_missing']) is not bool):
+            raise ValueError('Invalid stored phase repair state')
         result.append(message)
         index += 1
         calls = message.get("tool_calls") or []

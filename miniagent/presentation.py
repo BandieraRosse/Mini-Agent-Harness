@@ -16,6 +16,8 @@ class ToolRecord:
     args: dict
     result: dict | None = None
     review: str | None = None
+    live_status: dict | None = None
+    status_provider: object = None
 
 
 def _short(value, limit=160):
@@ -134,9 +136,9 @@ def _details(label, values):
 
 def tool_fragments(record: ToolRecord, detailed=False) -> list[tuple[str, str]]:
     """Render one stored tool call; never redact, mutate, or discard its data."""
-    result = record.result or {}
-    failed = record.result is not None and (result.get("ok") is False or result.get("exit_code") not in (None, 0))
-    running = not failed and (record.result is None or result.get("status") == "running")
+    result = {**(record.result or {}), **(record.live_status or {})}
+    failed = result.get("ok") is False or result.get("exit_code") not in (None, 0)
+    running = not failed and ((record.result is None and not record.live_status) or result.get("status") == "running")
     state = "error" if failed else "running" if running else "success"
     fragments = [(f"class:tool.{state}", "• " + _heading(record))]
     status = "失败" if failed else "执行中" if running else "完成"

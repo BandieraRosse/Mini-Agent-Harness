@@ -173,9 +173,14 @@ class ToolTests(unittest.TestCase):
         self.assertEqual((self.root / "new.txt").read_text(), "user content")
 
     def test_create_without_os_link(self):
-        with mock.patch.object(os, "link", create=True):
-            del os.link
+        original = getattr(os, 'link', None)
+        try:
+            if original is not None:
+                del os.link
             result = self.call("create_file", path="nested/new.txt", content="中文\n")
+        finally:
+            if original is not None:
+                os.link = original
         self.assertTrue(result["ok"], result)
         self.assertEqual((self.root / "nested/new.txt").read_bytes(), "中文\n".encode())
         self.assertEqual(list((self.root / "nested").glob(".miniagent-edit-*")), [])

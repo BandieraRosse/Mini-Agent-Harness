@@ -38,6 +38,7 @@ class UnifiedApplication(Application):
             return
         while True:
             await asyncio.sleep(interval)
+            self.refresh_jobs()
             rendered_size = self.renderer._last_size
             if rendered_size is not None and self.output.get_size() != rendered_size:
                 self._on_resize()
@@ -455,6 +456,8 @@ def build_app(terminal, styles):
                       full_screen=True, mouse_support=True, style=Style.from_dict(styles),
                       min_redraw_interval=0.03,
                       input=terminal.editor.app.input, output=terminal.editor.app.output)
+
+    app.refresh_jobs = terminal.refresh_jobs
     terminal._input_buffer = buffer
     app.transcript_window = body
     app.composer_window = composer

@@ -167,6 +167,8 @@ class Agent:
                 blockers = self.tools.completion_blockers() if not calls and hasattr(self.tools, "completion_blockers") else []
                 if message.get('phase') == 'final_answer' and blockers:
                     message['completion_deferred'] = True
+                if not message.get('phase'):
+                    message['phase_missing'] = True
                 self.session.append(message)
                 if not calls:
                     final = message.get("phase") == "final_answer"
@@ -186,7 +188,8 @@ class Agent:
                         continuation = "Continue the current task after your commentary. Use tools as needed; finish with [final_answer] only when ready."
                     else:
                         unclassified += 1
-                        continuation = "Your message has no explicit phase. Continue with [commentary] or finish with [final_answer]. No final answer has been accepted."
+                        self.ui.notice("回复缺少阶段标记，正在自动纠正；未展示该草稿。")
+                        continuation = "Your message has no explicit phase and its draft was hidden. Reissue it with [commentary] or [final_answer] as appropriate. Do not repeat completed operations merely to repair formatting. No final answer has been accepted."
                     self.session.append({"role": "user", "content": "MiniAgent runtime: " + continuation})
                     if unclassified >= 3:
                         self.session.data["status"] = "stalled"

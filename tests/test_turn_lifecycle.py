@@ -48,6 +48,21 @@ class TurnLifecycleTests(unittest.TestCase):
         agent = self.agent(untagged, untagged, untagged)
         self.assertFalse(agent.run("work"))
         self.assertEqual(self.session.data["status"], "stalled")
+        self.ui.stream.assert_not_called()
+
+    def test_untagged_draft_repair_displays_answer_only_once(self):
+        draft = completion('Same answer')
+        draft['choices'][0]['message'].pop('phase')
+        self.assertTrue(self.agent(draft, completion('[final_answer] Same answer')).run('answer'))
+        self.assertEqual(''.join(c.args[0] for c in self.ui.stream.call_args_list), 'Same answer')
+        self.assertTrue(self.session.messages[1]['phase_missing'])
+
+    def test_untagged_tool_text_is_admitted_without_replaying_tools(self):
+        response = completion('Checking', [call('read', '{"path":"."}', 'list_directory')])
+        response['choices'][0]['message'].pop('phase')
+        self.assertTrue(self.agent(response, completion('Done')).run('inspect'))
+        self.assertEqual(sum(m['role'] == 'tool' for m in self.session.messages), 1)
+        self.assertEqual(''.join(c.args[0] for c in self.ui.stream.call_args_list), 'CheckingDone')
 
     def test_finished_but_unobserved_job_blocks_final_until_poll(self):
         job = self.manager.run(python_command("raise SystemExit(3)"), yield_time_ms=0)
@@ -82,8 +97,8 @@ class TurnLifecycleTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             classify({"role": "assistant", "content": "[final_answer] done"}, False)
 
-    def test_final_stream_displays_before_finish_without_marker_or_duplicates(self):
-        for prefix in ('[final_answer]\n', '[commentary]\n', ''):
+    def test_marked_stream_displays_before_finish_without_prefix_or_duplicates(self):
+        for prefix in ('[final_answer]\n', '[commentary]\n'):
             pieces = []
             display = MessageDisplay(pieces.append, stream_final=True)
             for char in prefix:
@@ -93,6 +108,15 @@ class TurnLifecycleTests(unittest.TestCase):
             display.feed(' second')
             display.finish({'content': '第一段 second'})
             self.assertEqual(''.join(pieces), '第一段 second')
+
+    def test_untagged_stream_waits_for_native_metadata(self):
+        for metadata in ({'phase': 'final_answer'}, {'phase': 'commentary'}, {}):
+            pieces = []
+            display = MessageDisplay(pieces.append, stream_final=True)
+            display.feed('answer')
+            self.assertEqual(pieces, [])
+            display.finish({'content': 'answer', **metadata})
+            self.assertEqual(''.join(pieces), 'answer' if metadata else '')
 
     def test_blocked_final_stream_remains_hidden(self):
         pieces = []

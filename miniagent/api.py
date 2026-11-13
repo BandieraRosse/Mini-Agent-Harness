@@ -331,6 +331,8 @@ class ChatClient:
             clean = dict(message)
             clean.pop("responses_reasoning", None)
             phase = clean.pop("phase", None)
+            if clean.pop('phase_missing', False):
+                clean['content'] = 'Unaccepted draft; explicit phase was missing:\n' + (clean.get('content') or '')
             if clean.pop('completion_deferred', False):
                 phase = 'commentary'
                 clean['content'] = 'Unaccepted draft; required job results were still pending:\n' + (clean.get('content') or '')
