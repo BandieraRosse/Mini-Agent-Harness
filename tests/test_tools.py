@@ -1,5 +1,6 @@
 """Behavioral checks for bounded reads and changes that preserve existing work."""
 import json
+import errno
 import os
 from pathlib import Path
 import stat
@@ -170,6 +171,47 @@ class ToolTests(unittest.TestCase):
         result = self.call("create_file", path="new.txt", content="agent content")
         self.assertFalse(result["ok"])
         self.assertEqual((self.root / "new.txt").read_text(), "user content")
+
+    def test_create_without_os_link(self):
+        with mock.patch.object(os, "link", create=True):
+            del os.link
+            result = self.call("create_file", path="nested/new.txt", content="中文\n")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((self.root / "nested/new.txt").read_bytes(), "中文\n".encode())
+        self.assertEqual(list((self.root / "nested").glob(".miniagent-edit-*")), [])
+
+    def test_create_unsupported_link_falls_back(self):
+        for index, error in enumerate([NotImplementedError(), *(
+                OSError(code, "unsupported") for code in
+                (errno.ENOSYS, errno.ENOTSUP, errno.EPERM, errno.EXDEV))]):
+            with self.subTest(error=error), mock.patch.object(os, "link", side_effect=error, create=True):
+                result = self.call("create_file", path=f"new{index}.txt", content="new")
+            self.assertTrue(result["ok"], result)
+            self.assertEqual((self.root / f"new{index}.txt").read_text(), "new")
+
+    def test_create_fallback_preserves_concurrent_file(self):
+        def unsupported_link(source, target):
+            target.write_text("user content")
+            raise OSError(errno.ENOTSUP, "unsupported")
+        with mock.patch.object(os, "link", side_effect=unsupported_link, create=True):
+            result = self.call("create_file", path="new.txt", content="agent content")
+        self.assertEqual(result["error_code"], "FILE_EXISTS")
+        self.assertEqual((self.root / "new.txt").read_text(), "user content")
+        self.assertEqual(list(self.root.glob(".miniagent-edit-*")), [])
+
+    def test_create_fallback_cleans_up_failed_write(self):
+        with mock.patch.object(os, "link", side_effect=NotImplementedError(), create=True), \
+                mock.patch.object(os, "fsync", side_effect=[None, OSError("write failed")]):
+            result = self.call("create_file", path="new.txt", content="new")
+        self.assertEqual(result["error_code"], "IO_ERROR")
+        self.assertFalse((self.root / "new.txt").exists())
+        self.assertEqual(list(self.root.glob(".miniagent-edit-*")), [])
+
+    def test_create_link_io_error_does_not_fall_back(self):
+        with mock.patch.object(os, "link", side_effect=OSError(errno.EIO, "I/O failure"), create=True):
+            result = self.call("create_file", path="new.txt", content="new")
+        self.assertEqual(result["error_code"], "IO_ERROR")
+        self.assertFalse((self.root / "new.txt").exists())
 
     def test_patch_multiple_hunks_and_files(self):
         first = self.write("one.txt", "a\nb\nc\nd\ne\n")

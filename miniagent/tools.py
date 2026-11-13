@@ -6,6 +6,7 @@ permissions: this module is not a security sandbox.
 from __future__ import annotations
 
 import difflib
+import errno
 import fnmatch
 import math
 import os
@@ -504,7 +505,30 @@ class ToolRegistry:
         temporary = self._stage(target, data, None)
         try:
             # Hard linking publishes the complete file atomically and fails if it exists.
-            os.link(temporary, target)
+            link = getattr(os, "link", None)
+            if link is not None:
+                try:
+                    link(temporary, target)
+                except NotImplementedError:
+                    link = None
+                except OSError as exc:
+                    if exc.errno not in {errno.ENOSYS, errno.ENOTSUP, errno.EPERM, errno.EXDEV}:
+                        raise
+                    link = None
+            if link is None:
+                # Some Android Python builds lack link(); exclusive creation still
+                # prevents overwrites, but readers may observe incomplete content.
+                with target.open("xb") as handle:
+                    try:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    except BaseException:
+                        identity = os.fstat(handle.fileno())
+                        handle.close()
+                        if target.exists() and os.path.samestat(identity, target.stat()):
+                            target.unlink()
+                        raise
         finally:
             temporary.unlink(missing_ok=True)
         return {"ok": True, "path": self._relative(target),

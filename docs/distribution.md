@@ -88,7 +88,7 @@ curl --version
 
 一行安装通过管道运行，包操作不能等待键盘输入。入口先用 `dpkg --force-confold --configure --pending` 恢复未完成的配置，再执行完整升级和依赖安装；这些步骤设置非交互模式，并向 dpkg 传递保留已有配置文件的选项，避免 `openssl.cnf` 冲突导致 `end of file on stdin at conffile prompt`。发生该错误后，只要 curl 能启动，即可重新执行同一行安装命令恢复。若 curl 也无法启动，先手动执行 `dpkg --force-confold --configure --pending`，再执行上面的 apt 恢复步骤。其他包错误会停止安装，需根据输出排查。
 
-Android 适配目标是 Termux 中的 Python 3.10+ 终端环境，无需 root、Ubuntu/proot 或编译器。发布包附带纯 Python 依赖，可复用 Linux 安装器。安装和项目目录放在 Termux 私有 HOME 下；文件创建使用硬链接，不应假定共享存储支持相同的文件系统能力。
+Android 适配目标是 Termux 中的 Python 3.10+ 终端环境，无需 root、Ubuntu/proot 或编译器。发布包附带纯 Python 依赖，可复用 Linux 安装器。安装和项目目录放在 Termux 私有 HOME 下；文件创建优先使用硬链接，Python 缺少该接口或文件系统不支持时回退为独占创建，仍避免覆盖已有文件；回退期间可能读到未完成内容。共享存储的权限及其他文件系统能力仍需实际验证。
 
 1. 按 [Termux 官方安装说明](https://github.com/termux/termux-app#installation) 安装 Termux；需要复制到手机系统剪贴板时，同时安装 [Termux:API Android 应用](https://github.com/termux/termux-api)。两者必须来自同一渠道（例如都来自 F-Droid），避免签名不兼容；终端内的命令包不能代替 Android 应用。
 2. 在 Termux 准备 Python、下载工具及剪贴板命令：
