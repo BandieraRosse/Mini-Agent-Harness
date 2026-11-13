@@ -21,7 +21,7 @@ python3 scripts/distribute.py --build --bind 0.0.0.0 --port 8765
 python3 scripts/distribute.py --bind 0.0.0.0 --port 8765
 ```
 
-服务只提供 `/install.sh`、`/install.ps1`、`/install.py`、`/manifest.json` 和当前发布包，根路径显示 Linux 和 Windows 安装命令。项目文件、密钥、会话和目录列表不会作为下载内容提供。服务是公开下载服务，不带登录；在公网使用时，可放在已有 HTTPS 反向代理后，客户端填写对应 HTTPS 地址。
+服务只提供 `/install.sh`、`/install.ps1`、`/install.py`、`/manifest.json` 和当前发布包，根路径显示 Linux、Windows 和 Termux 安装命令。项目文件、密钥、会话和目录列表不会作为下载内容提供。服务是公开下载服务，不带登录；在公网使用时，可放在已有 HTTPS 反向代理后，客户端填写对应 HTTPS 地址。
 
 ## 2. 新 Linux 服务器安装
 
@@ -66,7 +66,47 @@ PYTHON=/usr/bin/python3.11 sh install-miniagent.sh http://SERVER:8765 \
 
 ### Android / Termux
 
-Android 适配目标是 Termux 中的 Python 3.10+ 终端环境。安装和项目目录放在 Termux 私有 HOME 下；文件创建使用硬链接，不应假定共享存储支持相同的文件系统能力。源码可直接用 `python -m miniagent -C "$HOME/project"` 启动，也可使用上面的 `curl ... | sh -s -- ...` 安装流程。
+云服务器更新代码、构建发布包并重启分发服务后，在手机 Termux 输入这一行即可安装或升级（默认分发端口 8765）：
+
+```bash
+curl -fsSL http://124.221.221.10:8765/install-termux.sh | sh
+```
+
+专用入口自动更新包索引、安装 Python/curl/termux-api 命令包并安装 MiniAgent、配置 PATH。完成后新开一个 Termux 会话，输入 `miniagent` 启动；首次配置模型和密钥。Termux:API Android 应用仍需单独安装，见下面第 1 步。若当前 Termux 没有 curl，先执行 `pkg install curl`。服务器需开放实际使用的分发端口；此入口须部署后才能使用，尚未验证公网连通性。其他地址可传参：`curl -fsSL https://example.com/install-termux.sh | sh -s -- https://example.com`。
+
+Android 适配目标是 Termux 中的 Python 3.10+ 终端环境，无需 root、Ubuntu/proot 或编译器。发布包附带纯 Python 依赖，可复用 Linux 安装器。安装和项目目录放在 Termux 私有 HOME 下；文件创建使用硬链接，不应假定共享存储支持相同的文件系统能力。
+
+1. 按 [Termux 官方安装说明](https://github.com/termux/termux-app#installation) 安装 Termux；需要复制到手机系统剪贴板时，同时安装 [Termux:API Android 应用](https://github.com/termux/termux-api)。两者必须来自同一渠道（例如都来自 F-Droid），避免签名不兼容；终端内的命令包不能代替 Android 应用。
+2. 在 Termux 准备 Python、下载工具及剪贴板命令：
+
+```bash
+pkg update
+pkg install python curl termux-api
+python --version
+```
+
+3. 将 `http://SERVER:8765` 换成实际分发地址；若分发服务配置 HTTPS，使用对应的 HTTPS 地址：
+
+```bash
+server='http://SERVER:8765'
+curl -fsSL "$server/install.sh" -o "$HOME/install-miniagent.sh"
+sh "$HOME/install-miniagent.sh" "$server" --add-to-path
+export PATH="$HOME/.local/bin:$PATH"
+mkdir -p "$HOME/projects/demo"
+miniagent -C "$HOME/projects/demo"
+```
+
+默认安装到 `~/.local/share/miniagent`，启动器在 `~/.local/bin/miniagent`，无需修改 Termux 系统目录。首次启动使用 `/settings` 配置 API 来源、模型和密钥；分发下载地址与模型 API 地址是两个独立配置。项目也可通过可选的 `pkg install git` 后克隆到 `~/projects/`。源码用户在仓库根目录安装依赖后，可用 `python -m miniagent` 启动。
+
+剪贴板可先独立检查：
+
+```bash
+printf '%s' 'MiniAgent 中文复制测试' | termux-clipboard-set
+```
+
+到手机其他应用粘贴确认内容；MiniAgent 中选中文字后 Ctrl+C 触发复制。手机粘贴到输入框由 Termux 处理。若命令不可用，检查 Android 应用与命令包是否都已安装、来源是否一致；MiniAgent 调用失败或超时会回退 OSC 52，实际效果取决于终端。手机键盘缺少 Ctrl/Esc 时可使用 Termux 的扩展按键；中文输入或显示异常时可先用 `miniagent --plain -C "$HOME/projects/demo"` 排查。
+
+升级时重复第 3 步下载并执行最新安装器，然后退出旧 MiniAgent 再启动。用户配置和项目会话保留；可用 `miniagent -C "$HOME/projects/demo" --resume` 恢复会话。安装时使用的 Python 路径写入启动器，Python 环境移动或重装后应重新安装 MiniAgent。
 
 安装器生成的启动脚本使用安装时 PATH 中的 `sh` 绝对路径，找不到时回退 `/bin/sh`。`install.sh` 应显式通过 `sh` 运行，避免其静态 shebang 对 Android 系统路径的依赖。Windows 安装行为不变。
 
@@ -96,6 +136,18 @@ miniagent -C "C:\path\to\project"
 已有分发服务需更新服务器上的 `scripts/` 并重启服务，才能开放新增的 `/install.ps1` 路由；仅重建发布包不会更新运行中的路由代码。
 
 ## 4. 发布更新
+
+本次 Termux 支持更新需要同时同步 `miniagent/`、`scripts/` 和文档到云服务器。在服务器项目目录构建发布包后，重启现有分发服务，使首页的 Android 安装指引生效；不要额外启动第二个占用相同端口的服务。若使用本文的 systemd 用户服务，可执行：
+
+```bash
+python3 scripts/build_release.py
+systemctl --user restart miniagent-distribute.service
+systemctl --user status miniagent-distribute.service --no-pager
+curl -fsS http://127.0.0.1:8765/
+curl -fsS http://127.0.0.1:8765/manifest.json
+```
+
+其他托管方式按现有部署重启；监听地址、端口和反向代理保持实际配置。确认首页包含 `Android / Termux`，manifest 能正常返回，再从手机执行安装。构建产物包含此前的 Shell、剪贴板和 Windows API 取消修复；同版本源码变更也会生成不同摘要，安装器据摘要创建新的发布目录。手机真机验收尚未完成，不将桌面测试视为 Android 验收。
 
 在分发机器上更新源码，再构建一次：
 

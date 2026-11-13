@@ -84,13 +84,20 @@ def create_server(
                     payload = (
                         "MiniAgent distribution\n\n"
                         "curl -fsSL http://HOST:8765/install.sh | sh -s -- http://HOST:8765\n\n"
+                        "Android / Termux (Python 3.10+):\n"
+                        "curl -fsSL http://124.221.221.10:8765/install-termux.sh | sh\n"
+                        "Install the Termux:API Android app from the same source as Termux.\n"
+                        "curl -fsSL http://HOST:8765/install.sh | sh -s -- http://HOST:8765 --add-to-path\n"
+                        'export PATH="$HOME/.local/bin:$PATH"\n'
+                        'mkdir -p "$HOME/projects/demo"\n'
+                        'miniagent -C "$HOME/projects/demo"\n\n'
                         "Windows PowerShell:\n"
                         "$server='http://HOST:8765'; & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing \""
                         "$server/install.ps1\").Content)) -Url $server -AddToPath\n\n"
-                        "Available: /install.sh /install.ps1 /install.py /manifest.json and the release archive.\n"
+                        "Available: /install.sh /install-termux.sh /install.ps1 /install.py /manifest.json and the release archive.\n"
                     ).encode("utf-8")
                     content_type = "text/plain; charset=utf-8"
-                elif route in ("/install.sh", "/install.ps1", "/install.py"):
+                elif route in ("/install.sh", "/install-termux.sh", "/install.ps1", "/install.py"):
                     file_path = _regular_file(scripts, route[1:])
                     content_type = "text/plain; charset=utf-8"
                 else:

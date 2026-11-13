@@ -47,7 +47,7 @@ miniagent --provider openai --base-url https://your-server:8443/v1 --model your-
 
 隐藏输入 API key 后可选择长期保存或仅本次使用。`/model` 查询模型列表并选择，`/model 模型名称` 直接切换。已移除 ChatGPT 登录、账号标签和 OAuth 依赖。
 
-## 分发到 Linux 和 Windows
+## 分发到 Linux、Windows 和 Android Termux
 
 项目附带只依赖 Python 标准库的分发服务。先在本项目目录运行：
 
@@ -72,6 +72,14 @@ $server='http://SERVER:8765'; & ([scriptblock]::Create((Invoke-WebRequest -UseBa
 miniagent -C "C:\path\to\project"
 ```
 
+Android 使用 Termux 的 Python 环境运行同一发布包，无需 Ubuntu/proot。云服务器部署更新后，手机输入一行即可自动准备依赖并安装或升级：
+
+```bash
+curl -fsSL http://124.221.221.10:8765/install-termux.sh | sh
+```
+
+完成后新开 Termux 会话，运行 `miniagent`。剪贴板还需安装与 Termux 同一渠道的 Termux:API Android 应用。完整步骤见 [Android / Termux](docs/distribution.md#android--termux)。手机真机验证仍待执行；不要求锁屏后持续运行。
+
 ## 能做什么
 
 - 中间消息与最终答复分离；没有工具调用也可以继续执行，必需后台任务终态未返回时不能收尾。
@@ -95,7 +103,7 @@ miniagent -C "C:\path\to\project"
 - [开发指南](docs/development.md)：本地开发、验证和文档维护规则。
 - [使用指南](docs/usage.md)：安装、密钥、模型、输入、恢复和排错。
 - [终端交互](docs/terminal.md)：摘要/详情、快捷键、中文编辑及 Codex 源码参考。
-- [分发与安装](docs/distribution.md)：标准库分发服务、Linux/Windows 一行安装、更新和离线使用。
+- [分发与安装](docs/distribution.md)：标准库分发服务、Linux/Windows/Termux 安装、更新和离线使用。
 - [架构](docs/architecture.md)：上下文、Agent 循环、检查点与权限边界。
 - [工具参考](docs/tools.md)：参数、分页、补丁及执行限制。
 - [验收记录](docs/validation.md)：自动测试与真实 API 验证。
