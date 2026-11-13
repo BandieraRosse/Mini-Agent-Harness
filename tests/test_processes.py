@@ -25,6 +25,14 @@ def python_command(source: str) -> str:
     return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
 
 
+class ShellSelectionTests(unittest.TestCase):
+    def test_posix_shell_uses_path_with_fallback(self):
+        with mock.patch.object(processes.os, "name", "posix"):
+            for found in ("/data/data/com.termux/files/usr/bin/sh", "/usr/bin/sh", None):
+                with mock.patch.object(processes.shutil, "which", return_value=found):
+                    self.assertEqual(processes.shell_description(), found or "/bin/sh")
+
+
 class ProcessManagerTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

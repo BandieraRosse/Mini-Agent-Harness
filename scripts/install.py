@@ -44,7 +44,10 @@ def launcher_text(release):
                 f'"{python}" "{entry}" %*\n'
                 'set "miniagent_exit=%errorlevel%"\n'
                 'chcp %miniagent_cp% >nul\nexit /b %miniagent_exit%\n')
-    return ("#!/bin/sh\n" + LAUNCHER_MARKER + "\nexec " + shlex.quote(sys.executable)
+    shell = shutil.which("sh") or "/bin/sh"
+    if any(char.isspace() for char in shell):
+        raise ValueError("Unsupported whitespace in launcher shell path")
+    return ("#!" + shell + "\n" + LAUNCHER_MARKER + "\nexec " + shlex.quote(sys.executable)
             + " " + shlex.quote(str(release / "agent.py")) + ' "$@"\n')
 
 

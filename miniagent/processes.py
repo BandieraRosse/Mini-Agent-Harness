@@ -34,7 +34,7 @@ def shell_description() -> str:
     if os.name == "nt":
         return (shutil.which("pwsh") or shutil.which("powershell")
                 or os.environ.get("COMSPEC", "cmd.exe"))
-    return "/bin/sh"
+    return shutil.which("sh") or "/bin/sh"
 
 
 def _shell_arguments(shell: str, command: str) -> list[str]:

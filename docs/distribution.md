@@ -64,6 +64,14 @@ PYTHON=/usr/bin/python3.11 sh install-miniagent.sh http://SERVER:8765 \
 
 安装命令会保留实际使用的解释器路径。未传 `--add-to-path` 时不修改 Shell 配置，会打印当前终端的 PATH 命令。Python 低于 3.10 会提示退出，不自动升级系统 Python。
 
+### Android / Termux
+
+Android 适配目标是 Termux 中的 Python 3.10+ 终端环境。安装和项目目录放在 Termux 私有 HOME 下；文件创建使用硬链接，不应假定共享存储支持相同的文件系统能力。源码可直接用 `python -m miniagent -C "$HOME/project"` 启动，也可使用上面的 `curl ... | sh -s -- ...` 安装流程。
+
+安装器生成的启动脚本使用安装时 PATH 中的 `sh` 绝对路径，找不到时回退 `/bin/sh`。`install.sh` 应显式通过 `sh` 运行，避免其静态 shebang 对 Android 系统路径的依赖。Windows 安装行为不变。
+
+目前完成路径和剪贴板命令适配与模拟测试，尚未完成 Android 真机验收。手机上需验证：启动及中文输入、文件创建和替换、命令输出、后台任务轮询、超时和取消后的子进程清理、真实 API 连接取消，以及剪贴板复制。Termux:API 配置见[终端交互](terminal.md)。锁屏后持续运行不属于支持要求。
+
 ## 3. Windows 一键安装
 
 Windows PowerShell 5.1 或 PowerShell 7 中执行，把 `SERVER` 替换为分发机器地址：

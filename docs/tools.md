@@ -96,7 +96,7 @@
 
 结果包含 `output`、`exit_code`、`elapsed`、`timeout`、`remaining`、`cwd`、`job_id`、`status`、`complete`、`next_offset` 和截断标志。`elapsed` 为已运行秒数，`timeout` 为启动时设置的总运行时限，`remaining` 为距离该期限的剩余秒数（最少为 0，终态统一为 0）；轮询不会重置期限，终态耗时不再增长。运行中 `exit_code` 为 `null`；`status` 为 `running`、`completed`、`timed_out` 或 `cancelled`。非零退出码、超时和取消都会令 `ok` 为 `false`；超时错误明确说明总运行时限已到且进程树已终止。
 
-Windows 优先使用 `pwsh`，否则使用 Windows PowerShell（都关闭 profile 并设置 UTF-8）；两者均不可用时才回退 cmd。POSIX 固定使用 `/bin/sh`，不依赖登录 Shell。实际可执行文件路径会传入模型的运行环境上下文。
+Windows 优先使用 `pwsh`，否则使用 Windows PowerShell（都关闭 profile 并设置 UTF-8）；两者均不可用时才回退 cmd。POSIX 从 PATH 查找 `sh`，找不到时回退 `/bin/sh`，不依赖登录 Shell；这也允许使用 Termux 自己的解释器。实际可执行文件路径会传入模型的运行环境上下文。
 
 `yield_time_ms` 为 0–60,000 的整数毫秒，默认 10,000，仅控制首次调用的等待时间；`wait_ms` 为 0–300,000 的整数毫秒，默认 1,000，仅控制本次轮询等待时间，有未读输出或任务结束时提前返回。两者到期都不会终止进程，进程总运行期限由 `timeout` 独立控制。`max_output_bytes` 为 256–65,536，默认 16 KiB，限制本次 `output` 和 `output_tail` 的合计 UTF-8 字节数（元数据不计入）。等待可取消；轮询时取消会终止对应任务的进程树。`has_more` 表示已有输出尚未读完，`complete` 表示进程结束，二者分别检查；启动成功不代表测试成功。
 

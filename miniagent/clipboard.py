@@ -16,7 +16,7 @@ def copy_text(text, output):
     elif sys.platform == 'darwin':
         command = ['pbcopy']
     else:
-        command = next((args for args in (['wl-copy'], ['xclip', '-selection', 'clipboard'],
+        command = next((args for args in (['termux-clipboard-set'], ['wl-copy'], ['xclip', '-selection', 'clipboard'],
                                          ['xsel', '--clipboard', '--input'])
                         if shutil.which(args[0])), None)
     if command:

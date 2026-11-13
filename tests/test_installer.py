@@ -96,7 +96,16 @@ class InstallerTests(unittest.TestCase):
                 patch.object(self.installer, "download", side_effect=[manifest, data]):
             _, launcher = self.installer.install("https://example.test", self.root / "app", self.bin_dir)
         self.assertEqual(launcher.name, "miniagent")
-        self.assertTrue(launcher.read_text(encoding="utf-8").startswith("#!/bin/sh\n"))
+        shell = self.installer.shutil.which("sh") or "/bin/sh"
+        self.assertTrue(launcher.read_text(encoding="utf-8").startswith("#!" + shell + "\n"))
+
+    def test_termux_launcher_shell(self):
+        shell = "/data/data/com.termux/files/usr/bin/sh"
+        with patch.object(self.installer, "WINDOWS", False), \
+                patch.object(self.installer.shutil, "which", return_value=shell):
+            text = self.installer.launcher_text(self.root)
+        self.assertTrue(text.startswith("#!" + shell + "\n"))
+        self.assertIn(' "$@"', text)
 
     def test_windows_user_path_is_preserved_and_case_insensitively_idempotent(self):
         registry = MagicMock()

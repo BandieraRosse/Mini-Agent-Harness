@@ -134,7 +134,7 @@ class APITests(unittest.TestCase):
                 connection = SimpleNamespace(sock=local, connect=lambda: None)
                 client._connection(lambda *args, **kwargs: connection, 'unused').connect()
                 handle = client._active_socket
-                response = local.makefile('rb')
+                response = connection.sock.makefile('rb')
                 # Mirror urllib: the reader owns the remaining reference, while
                 # the socket object originally tracked by MiniAgent is closed.
                 local.close()
@@ -169,7 +169,10 @@ class APITests(unittest.TestCase):
                     with patch.object(client._opener, 'open', return_value=Response()):
                         worker.start()
                         self.assertTrue(entered.wait(1))
-                        client.cancel()
+                        # Verify the bounded reader independently of shutdown;
+                        # Windows may not wake select when shutdown succeeds.
+                        with patch.object(client, '_active_socket'):
+                            client.cancel()
                         worker.join(1)
                         self.assertFalse(worker.is_alive(), 'cancel must wake the response reader')
                     self.assertEqual(len(errors), 1)
@@ -181,6 +184,23 @@ class APITests(unittest.TestCase):
                     worker.join(4)
                     response.close()
                     client._release_socket()
+
+    def test_tracked_reader_preserves_data_and_timeout(self):
+        client = ChatClient(Config(max_retries=0), 'secret-token')
+        local, peer = socket.socketpair()
+        local.settimeout(0.2)
+        connection = SimpleNamespace(sock=local, connect=lambda: None)
+        try:
+            client._connection(lambda *args, **kwargs: connection, 'unused').connect()
+            with connection.sock.makefile('rb') as reader:
+                peer.sendall(b'hello\n')
+                self.assertEqual(reader.readline(), b'hello\n')
+                with self.assertRaises(TimeoutError):
+                    reader.read(1)
+        finally:
+            local.close()
+            peer.close()
+            client._release_socket()
 
     def test_transport_errors_are_actionable_without_leaking_exception_details(self):
         cases = [

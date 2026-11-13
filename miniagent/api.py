@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import select
 import socket
 import ssl
 import threading
@@ -40,6 +41,17 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Even same-origin redirects can turn into cross-origin credential forwarding.
         return None
+
+
+class _ReadSocket:
+    """Delegate socket operations while supplying a cancellable HTTP reader."""
+
+    def __init__(self, sock, makefile):
+        self._sock = sock
+        self.makefile = makefile
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
 
 
 def _connection_failure(error):
@@ -220,6 +232,37 @@ class ChatClient:
             # HTTPResponse. Keep a separate handle so shutdown still interrupts
             # that reader. A plain socket handle also works for TLS shutdown.
             sock = connection.sock
+            makefile = sock.makefile
+
+            def cancellable_makefile(*args, **kwargs):
+                handle = makefile(*args, **kwargs)
+                raw = getattr(handle, "raw", handle)
+                readinto = raw.readinto
+
+                def cancellable_readinto(buffer):
+                    # Windows select may keep waiting after another socket handle
+                    # is shut down. Bound each readiness wait instead. Do not use
+                    # short socket timeouts: they poison buffered HTTP readers.
+                    timeout = sock.gettimeout()
+                    deadline = None if timeout is None else time.monotonic() + timeout
+                    while True:
+                        self.check_cancelled()
+                        if isinstance(sock, ssl.SSLSocket) and sock.pending():
+                            break
+                        remaining = None if deadline is None else deadline - time.monotonic()
+                        if remaining is not None and remaining <= 0:
+                            raise TimeoutError("API socket read timed out")
+                        ready, _, _ = select.select([sock], [], [],
+                                                   min(0.1, remaining) if remaining is not None else 0.1)
+                        if ready:
+                            break
+                    self.check_cancelled()
+                    return readinto(buffer)
+
+                raw.readinto = cancellable_readinto
+                return handle
+
+            connection.sock = _ReadSocket(sock, cancellable_makefile)
             with self._socket_lock:
                 self._active_socket = socket.socket(
                     sock.family, sock.type, sock.proto, fileno=socket.dup(sock.fileno()))
